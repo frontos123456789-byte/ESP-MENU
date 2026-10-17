@@ -2,6 +2,7 @@
 -- Execute only once per session; running again replaces the previous instance.
 local Players = game:GetService('Players')
 local RunService = game:GetService('RunService')
+local UserInputService = game:GetService('UserInputService')
 local player = Players.LocalPlayer
 local parent = player:WaitForChild('PlayerGui')
 local previous = parent:FindFirstChild('UAV_ESP_Menu')
@@ -165,6 +166,52 @@ autoButton.Activated:Connect(function()
         automatic, calibrating = true, false
     end)
 end)
+local function numberField(placeholder)
+    order = order+1
+    local field = Instance.new('TextBox')
+    field.LayoutOrder = order
+    field.Size = UDim2.new(1,-16,0,44)
+    field.Text = ''
+    field.PlaceholderText = placeholder
+    field.TextSize = 14
+    field.TextColor3 = Color3.new(1,1,1)
+    field.PlaceholderColor3 = Color3.fromRGB(190,190,190)
+    field.BackgroundColor3 = Color3.fromRGB(43,49,65)
+    field.ClearTextOnFocus = false
+    field.Parent = body
+    Instance.new('UICorner',field).CornerRadius = UDim.new(0,6)
+    return field
+end
+row('Упреждение: параметры оружия',false)
+local bulletSpeed = numberField('Скорость пули, м/с')
+local bulletDrop = numberField('Ускорение падения, м/с² (0 = нет)')
+local aimStatus = row('Введи оба параметра пули',false,40)
+local aimButton = Instance.new('TextButton')
+aimButton.AnchorPoint = Vector2.new(1,1)
+aimButton.Position = UDim2.new(1,-16,1,-90)
+aimButton.Size = UDim2.fromOffset(112,54)
+aimButton.Text = 'Удерживать\nнаведение'
+aimButton.TextSize = 14
+aimButton.TextColor3 = Color3.new(1,1,1)
+aimButton.BackgroundColor3 = Color3.fromRGB(43,49,65)
+aimButton.BackgroundTransparency = 0.15
+aimButton.Parent = root
+Instance.new('UICorner',aimButton).CornerRadius = UDim.new(0,12)
+local heldInput, lockedTarget
+local function releaseAim()
+    heldInput, lockedTarget = nil,nil
+    aimButton.BackgroundColor3 = Color3.fromRGB(43,49,65)
+end
+aimButton.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        heldInput = input
+        aimButton.BackgroundColor3 = Color3.fromRGB(55,100,75)
+    end
+end)
+table.insert(connections,UserInputService.InputEnded:Connect(function(input)
+    if input == heldInput then releaseAim() end
+end))
+table.insert(connections,UserInputService.WindowFocusReleased:Connect(releaseAim))
 local status = row('Поиск объектов…', false, 40)
 row('Выключить и удалить ESP', true).Activated:Connect(function() gui:Destroy() end)
 
@@ -279,10 +326,12 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         local now = os.clock()
         local delta = now-sample.time
         if sample.part ~= item.part then
-            sample.speed = nil
+            sample.speed, sample.velocity = nil,nil
         elseif delta >= 0.15 then
             -- Position samples also cover anchored objects moved with PivotTo/CFrame.
-            local measured = (item.part.Position-sample.position).Magnitude/delta
+            local velocity = (item.part.Position-sample.position)/delta
+            sample.velocity = sample.velocity and sample.velocity:Lerp(velocity,0.5) or velocity
+            local measured = velocity.Magnitude
             sample.speed = sample.speed and (sample.speed*0.5+measured*0.5) or measured
         end
         if delta >= 0.15 or sample.part ~= item.part then
@@ -341,3 +390,92 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
         end
     end
 end))
+
+-- Constant-speed projectile with downward acceleration; constant-velocity target.
+-- No drag, wind or inherited shooter velocity: these require the weapon's real model.
+local function intercept(relative, velocity, speed, gravity)
+    local acceleration = Vector3.new(0,-gravity,0)
+    local function residual(t)
+        return (relative+velocity*t-acceleration*(0.5*t*t)).Magnitude-speed*t
+    end
+    local previousTime = 0
+    for step=1,120 do
+        local t = step*0.05
+        if residual(t) <= 0 then
+            local low, high = previousTime,t
+            for _=1,18 do
+                local mid = (low+high)*0.5
+                if residual(mid)>0 then low=mid else high=mid end
+            end
+            local flightTime = (low+high)*0.5
+            return relative+velocity*flightTime-acceleration*(0.5*flightTime*flightTime)
+        end
+        previousTime=t
+    end
+end
+local function parameter(field)
+    return tonumber((field.Text:gsub(',','.')))
+end
+-- Run after Roblox's camera controller. Releasing the button restores normal camera updates.
+local aimBinding = 'UAV_ESP_HoldAim'
+gui.Destroying:Connect(function()
+    releaseAim()
+    RunService:UnbindFromRenderStep(aimBinding)
+end)
+RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function()
+    if not alive then return end
+    local speed, gravity = parameter(bulletSpeed),parameter(bulletDrop)
+    if not speed or speed<=0 or speed>10000 or not gravity or gravity<0 or gravity>10000 then
+        aimStatus.Text = 'Введи скорость > 0 и падение ≥ 0'
+        lockedTarget = nil
+        return
+    end
+    if not heldInput or UserInputService:GetFocusedTextBox() then
+        aimStatus.Text = 'Удерживай кнопку • цель у прицела'
+        lockedTarget = nil
+        return
+    end
+    local camera = workspace.CurrentCamera
+    local character = player.Character
+    local head = character and character:FindFirstChild('Head')
+    if not camera or not head then return end
+    local origin = head.Position
+    -- Prefer a conventional muzzle attachment; fall back to the character's head.
+    local tool = character:FindFirstChildOfClass('Tool')
+    local muzzle = tool and (tool:FindFirstChild('Muzzle',true) or tool:FindFirstChild('MuzzleAttachment',true))
+    if muzzle then
+        if muzzle:IsA('Attachment') then origin=muzzle.WorldPosition
+        elseif muzzle:IsA('BasePart') then origin=muzzle.Position end
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {character,camera}
+    local center = camera.ViewportSize*0.5
+    local radius = math.min(camera.ViewportSize.X,camera.ViewportSize.Y)*0.22
+    local best, bestDistance = nil, radius
+    for object, sample in pairs(motion) do
+        local part = sample.part
+        if part and part:IsDescendantOf(workspace) and sample.velocity then
+            local kind = candidates[object]
+            local point,onScreen = camera:WorldToViewportPoint(part.Position)
+            local screenDistance = (Vector2.new(point.X,point.Y)-center).Magnitude
+            if kind and (enabled[kind] or enabled.uav) and onScreen and screenDistance<=radius
+                and (part.Position-origin).Magnitude<=distance then
+                local hit = workspace:Raycast(origin,part.Position-origin,params)
+                if not hit or hit.Instance==object or hit.Instance:IsDescendantOf(object) then
+                    if object==lockedTarget then best=object; break end
+                    if screenDistance<bestDistance then best,bestDistance=object,screenDistance end
+                end
+            end
+        end
+    end
+    lockedTarget=best
+    if not best then aimStatus.Text='Нет видимой цели у прицела'; return end
+    local sample=motion[best]
+    local direction=intercept(sample.part.Position-origin,sample.velocity,speed/METERS_PER_STUD,gravity/METERS_PER_STUD)
+    if not direction or direction.Magnitude<0.001 then
+        aimStatus.Text='Нет решения до 6 с полёта'; return
+    end
+    camera.CFrame=CFrame.lookAt(camera.CFrame.Position,camera.CFrame.Position+direction)
+    aimStatus.Text='Наведение • расчётное упреждение'
+end)
