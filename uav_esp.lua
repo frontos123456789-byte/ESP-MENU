@@ -2,7 +2,6 @@
 -- Execute only once per session; running again replaces the previous instance.
 local Players = game:GetService('Players')
 local RunService = game:GetService('RunService')
-local UserInputService = game:GetService('UserInputService')
 local player = Players.LocalPlayer
 local parent = player:WaitForChild('PlayerGui')
 local previous = parent:FindFirstChild('UAV_ESP_Menu')
@@ -166,35 +165,6 @@ autoButton.Activated:Connect(function()
         automatic, calibrating = true, false
     end)
 end)
-row('AIM • Stinger-M',false)
-local aimStatus = row('Возьми Stinger-M и удерживай AIM',false,44)
-local aimButton = Instance.new('TextButton')
-aimButton.AnchorPoint = Vector2.new(1,1)
-aimButton.Position = UDim2.new(1,-16,1,-90)
-aimButton.Size = UDim2.fromOffset(112,54)
-aimButton.Text = 'Удерживать\nAIM • Stinger'
-aimButton.TextSize = 14
-aimButton.TextColor3 = Color3.new(1,1,1)
-aimButton.BackgroundColor3 = Color3.fromRGB(43,49,65)
-aimButton.BackgroundTransparency = 0.15
-aimButton.Parent = root
-Instance.new('UICorner',aimButton).CornerRadius = UDim.new(0,12)
-local heldInput, lockedTarget
-local function releaseAim()
-    heldInput, lockedTarget = nil,nil
-    aimButton.BackgroundColor3 = Color3.fromRGB(43,49,65)
-end
-aimButton.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        if heldInput then return end
-        heldInput = input
-        aimButton.BackgroundColor3 = Color3.fromRGB(55,100,75)
-    end
-end)
-table.insert(connections,UserInputService.InputEnded:Connect(function(input)
-    if input == heldInput then releaseAim() end
-end))
-table.insert(connections,UserInputService.WindowFocusReleased:Connect(releaseAim))
 local status = row('Поиск объектов…', false, 40)
 row('Выключить и удалить ESP', true).Activated:Connect(function() gui:Destroy() end)
 
@@ -374,21 +344,6 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
     end
 end))
 
--- Stinger uses the game's native target locking. Keep the camera on the current
--- target; do not lead a homing missile, bypass readiness or send launch remotes.
-local aimBinding = 'UAV_ESP_HoldAim'
-local aimElapsed = 1
-local lockedPart
-local function stingerRange(tool)
-    local storage = game:GetService('ReplicatedStorage')
-    local folder = storage:FindFirstChild('StingerFolder') or tool:FindFirstChild('StingerFolder')
-    local value = folder and folder:FindFirstChild('StingerRange')
-    if value and (value:IsA('NumberValue') or value:IsA('IntValue')) then
-        local range = value.Value
-        if range==range and range>0 and range<math.huge then return range,true end
-    end
-    return 5000,false
-end
 local function targetPart(object)
     if not object or not object:IsDescendantOf(workspace) then return end
     if object:IsA('Model') then
@@ -405,7 +360,6 @@ local function blockedAncestor(object,character)
     end
     return false
 end
-local launchConfirmed=false
 local counter=Instance.new('TextLabel')
 counter.Name='SkyCounter'
 counter.AnchorPoint=Vector2.new(1,0)
@@ -418,7 +372,6 @@ counter.TextSize=15;counter.Text='БПЛА в небе: …'
 counter.Parent=root
 Instance.new('UICorner',counter).CornerRadius=UDim.new(0,8)
 local ownerKeys={'shooter','Shooter','owner','Owner','player','Player','creator','Creator','OwnerUserId','ShooterUserId','UserId','userId'}
-local targetKeys={'target','Target','targetModel','TargetModel','targetInstance','TargetInstance','lockedTarget','LockedTarget'}
 local function metadata(object,keys)
     local current=object
     for _=1,3 do
@@ -434,10 +387,6 @@ local function metadata(object,keys)
         end
         current=current.Parent
     end
-end
-local function isLocalOwner(value)
-    return value==player or (player.Character~=nil and value==player.Character)
-        or value==player.UserId or value==tostring(player.UserId) or value==player.Name
 end
 local function isPlayerOwner(value)
     if typeof(value)=='Instance' then
@@ -460,61 +409,6 @@ local function interceptor(object)
     if name:find('stinger',1,true) or name:find('interceptor',1,true) then return true end
     return rocketLike(object) and isPlayerOwner(metadata(object,ownerKeys))
 end
-local function clearAimTarget()
-    lockedTarget,lockedPart=nil,nil
-    launchConfirmed=false
-end
-local function sameTarget(target)
-    if not lockedTarget or typeof(target)~='Instance' then return false end
-    return target==lockedTarget or target:IsDescendantOf(lockedTarget)
-end
-local function confirmLaunch(owner,target)
-    if not heldInput or not isLocalOwner(owner) or not sameTarget(target) then return false end
-    local character=player.Character
-    local tool=character and character:FindFirstChildOfClass('Tool')
-    if not tool or tool.Name~='Stinger-M' then return false end
-    launchConfirmed=true
-    return true
-end
--- Listen only for server-to-client creation/replication notifications, never fire remotes.
-local remoteConnections={}
-local function attachRocketEvent(event)
-    if not (event:IsA('RemoteEvent') or event:IsA('UnreliableRemoteEvent')) or remoteConnections[event] then return end
-    local name=string.lower(event.Name)
-    if not (name:find('rocket',1,true) or name:find('missile',1,true) or name:find('stinger',1,true)) then return end
-    if name:find('hit',1,true) or name:find('destroy',1,true) or name:find('remove',1,true) or name:find('update',1,true) then return end
-    if not (name:find('replicate',1,true) or name:find('spawn',1,true) or name:find('launch',1,true)) then return end
-    local connection=event.OnClientEvent:Connect(function(...)
-        if not alive or not heldInput or not lockedTarget then return end
-        for _,payload in ipairs({...}) do
-            if type(payload)=='table' then
-                local owner,target
-                for _,key in ipairs(ownerKeys) do if payload[key]~=nil then owner=payload[key];break end end
-                for _,key in ipairs(targetKeys) do if payload[key]~=nil then target=payload[key];break end end
-                if confirmLaunch(owner,target) then return end
-            elseif typeof(payload)=='Instance' and rocketLike(payload) then
-                if confirmLaunch(metadata(payload,ownerKeys),metadata(payload,targetKeys)) then return end
-            end
-        end
-    end)
-    remoteConnections[event]=connection
-    table.insert(connections,connection)
-end
-local storage=game:GetService('ReplicatedStorage')
-local eventRoot=storage:FindFirstChild('Events')
-if eventRoot then
-    for _,event in ipairs(eventRoot:GetDescendants()) do attachRocketEvent(event) end
-    table.insert(connections,eventRoot.DescendantAdded:Connect(attachRocketEvent))
-end
--- A freshly replicated rocket with explicit owner + target is a second confirmation source.
-local pendingRockets={}
-local pendingCount=0
-table.insert(connections,workspace.DescendantAdded:Connect(function(object)
-    if heldInput and lockedTarget and pendingCount<64 and (object:IsA('Model') or object:IsA('BasePart')) and rocketLike(object) then
-        pendingRockets[object]=os.clock()
-        pendingCount=pendingCount+1
-    end
-end))
 local roster={}
 local function rebuildRoster()
     roster={}
@@ -550,87 +444,7 @@ local function rebuildRoster()
     counter.Text=(droneFolder and 'БПЛА в небе: ' or 'БПЛА найдено: ')..#roster
 end
 local rosterTime=1
-local rocketTime=0
 table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     rosterTime=rosterTime+dt
     if rosterTime>=0.5 then rosterTime=0;rebuildRoster() end
-    rocketTime=rocketTime+dt
-    if rocketTime<0.1 then return end
-    rocketTime=0
-    local now=os.clock()
-    for rocket,started in pairs(pendingRockets) do
-        local remove=not heldInput or not rocket:IsDescendantOf(workspace) or now-started>3
-        if not remove then remove=confirmLaunch(metadata(rocket,ownerKeys),metadata(rocket,targetKeys)) end
-        if remove then pendingRockets[rocket]=nil;pendingCount=pendingCount-1 end
-    end
 end))
-gui.Destroying:Connect(function()
-    releaseAim()
-    clearAimTarget()
-    table.clear(pendingRockets)
-    RunService:UnbindFromRenderStep(aimBinding)
-end)
-RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
-    if not alive then return end
-    local character=player.Character
-    local tool=character and character:FindFirstChildOfClass('Tool')
-    if not tool or tool.Name~='Stinger-M' then
-        clearAimTarget();aimStatus.Text='Возьми Stinger-M в руки';return
-    end
-    if not heldInput or UserInputService:GetFocusedTextBox() then
-        clearAimTarget();aimElapsed=1
-        aimStatus.Text='Удерживай AIM • ближайшая цель по расстоянию';return
-    end
-    local camera=workspace.CurrentCamera
-    local head=character:FindFirstChild('Head')
-    if not camera or not head then clearAimTarget();return end
-    local humanoid=character:FindFirstChildOfClass('Humanoid')
-    if humanoid and humanoid.Health<=0 then releaseAim();clearAimTarget();return end
-    aimElapsed=aimElapsed+dt
-    if aimElapsed>=0.1 then
-        aimElapsed=0
-        local range=stingerRange(tool)
-        local params=RaycastParams.new()
-        params.FilterType=Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances={character,camera}
-        local function visible(object,part)
-            if not part or interceptor(object) or blockedAncestor(object,character) then return false end
-            if (part.Position-head.Position).Magnitude>range then return false end
-            local direction=part.Position-camera.CFrame.Position
-            if direction.Magnitude<0.001 then return false end
-            local hit=workspace:Raycast(camera.CFrame.Position,direction,params)
-            return not hit or hit.Instance==object or hit.Instance:IsDescendantOf(object)
-        end
-        lockedPart=targetPart(lockedTarget)
-        -- A destroyed target cannot be held; obstruction alone does not authorize switching.
-        if lockedTarget and not lockedPart then clearAimTarget() end
-        if not lockedTarget or launchConfirmed then
-            local nearest,nearestPart
-            local nearestDistance=lockedPart and (lockedPart.Position-head.Position).Magnitude or math.huge
-            for _,object in ipairs(roster) do
-                if object~=lockedTarget then
-                    local part=targetPart(object)
-                    if part then
-                        local d=(part.Position-head.Position).Magnitude
-                        if d<nearestDistance and visible(object,part) then
-                            nearest,nearestPart,nearestDistance=object,part,d
-                        end
-                    end
-                end
-            end
-            if nearest then
-                lockedTarget,lockedPart=nearest,nearestPart
-                launchConfirmed=false
-            end
-        end
-        if lockedTarget then
-            if launchConfirmed then aimStatus.Text='Пуск подтверждён • жду более близкую цель'
-            elseif visible(lockedTarget,lockedPart) then aimStatus.Text='Цель удерживается • жду подтверждённый пуск'
-            else aimStatus.Text='Цель скрыта/далеко • удерживаю до пуска' end
-        else aimStatus.Text='Нет доступной цели в дальности Stinger' end
-    end
-    if lockedPart and lockedPart:IsDescendantOf(workspace) then
-        local direction=lockedPart.Position-camera.CFrame.Position
-        if direction.Magnitude>0.001 then camera.CFrame=CFrame.lookAt(camera.CFrame.Position,lockedPart.Position) end
-    else clearAimTarget() end
-end)
