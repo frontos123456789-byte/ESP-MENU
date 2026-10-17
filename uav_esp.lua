@@ -16,7 +16,9 @@ local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, uav = false}
 local candidates, marks, connections = {}, {}, {}
-local colors = {drone = Color3.fromRGB(70,230,255), missile = Color3.fromRGB(255,100,90), uav = Color3.fromRGB(255,215,80)}
+local METERS_PER_STUD = 0.28
+local clearColor = Color3.fromRGB(70,220,105)
+local blockedColor = Color3.fromRGB(245,75,75)
 local names = {drone = 'Дрон', missile = 'Ракета', uav = 'БПЛА'}
 -- Add exact object names here if the game uses different names.
 local patterns = {
@@ -49,23 +51,68 @@ local function cleanup()
 end
 gui.Destroying:Connect(cleanup)
 
+-- Safe-area root automatically follows rotation, viewport size and device insets.
+gui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets
+local root = Instance.new('Frame')
+root.Size = UDim2.fromScale(1,1)
+root.BackgroundTransparency = 1
+root.Parent = gui
 local panel = Instance.new('Frame')
-panel.Size = UDim2.fromOffset(270, 350)
-panel.Position = UDim2.new(0, 12, 0.18, 0)
+panel.Position = UDim2.fromOffset(8,8)
 panel.BackgroundColor3 = Color3.fromRGB(24,28,38)
-panel.Parent = gui
+panel.Parent = root
 Instance.new('UICorner', panel).CornerRadius = UDim.new(0,12)
-local layout = Instance.new('UIListLayout', panel)
+local toggle = Instance.new('TextButton')
+toggle.Size = UDim2.fromOffset(64,44)
+toggle.Position = UDim2.fromOffset(8,8)
+toggle.Text = 'ESP'
+toggle.TextSize = 16
+toggle.TextColor3 = Color3.new(1,1,1)
+toggle.BackgroundColor3 = Color3.fromRGB(43,49,65)
+toggle.Visible = false
+toggle.Parent = root
+Instance.new('UICorner',toggle).CornerRadius = UDim.new(0,10)
+local close = Instance.new('TextButton')
+close.Size = UDim2.new(1,-16,0,44)
+close.Position = UDim2.fromOffset(8,4)
+close.Text = 'БПЛА ESP     × Скрыть'
+close.TextSize = 16
+close.TextColor3 = Color3.new(1,1,1)
+close.BackgroundTransparency = 1
+close.Parent = panel
+close.Activated:Connect(function()
+    panel.Visible = false
+    toggle.Visible = true
+end)
+toggle.Activated:Connect(function()
+    panel.Visible = true
+    toggle.Visible = false
+end)
+local body = Instance.new('ScrollingFrame')
+body.Position = UDim2.fromOffset(0,52)
+body.Size = UDim2.new(1,0,1,-60)
+body.BackgroundTransparency = 1
+body.BorderSizePixel = 0
+body.ScrollBarThickness = 3
+body.ScrollingDirection = Enum.ScrollingDirection.Y
+body.AutomaticCanvasSize = Enum.AutomaticSize.Y
+body.CanvasSize = UDim2.new()
+body.Parent = panel
+local function fitPanel()
+    panel.Size = UDim2.fromOffset(math.min(290,math.max(1,root.AbsoluteSize.X-16)),
+        math.min(470,math.max(1,root.AbsoluteSize.Y-16)))
+end
+table.insert(connections,root:GetPropertyChangedSignal('AbsoluteSize'):Connect(fitPanel))
+fitPanel()
+local layout = Instance.new('UIListLayout', body)
 layout.Padding = UDim.new(0,6)
 layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 layout.SortOrder = Enum.SortOrder.LayoutOrder
-local padding = Instance.new('UIPadding', panel)
-padding.PaddingTop = UDim.new(0,8)
 local order = 0
 local function row(text, button, height)
     order = order + 1
     local item = Instance.new(button and 'TextButton' or 'TextLabel')
-    item.Size = UDim2.new(1,-16,0,height or 34)
+    item.Size = UDim2.new(1,-16,0,height or 44)
     item.LayoutOrder = order
     item.Text = text
     item.TextSize = 15
@@ -74,19 +121,19 @@ local function row(text, button, height)
     item.TextWrapped = true
     item.BackgroundColor3 = Color3.fromRGB(43,49,65)
     item.BorderSizePixel = 0
-    item.Parent = panel
+    item.Parent = body
     Instance.new('UICorner', item).CornerRadius = UDim.new(0,6)
     return item
 end
-row('БПЛА ESP • предварительная версия', false)
+-- Header remains accessible while the settings scroll.
 for _, kind in ipairs({'drone', 'missile', 'uav'}) do
     local button = row(names[kind] .. ': ВЫКЛ', true)
     button.Activated:Connect(function()
         enabled[kind] = not enabled[kind]
-        button.Text = names[kind] .. ': ' .. (enabled[kind] and 'ВКЛ' or 'ВЫКЛ')
+        button.Text = (kind == 'uav' and 'Все БПЛА' or names[kind]) .. ': ' .. (enabled[kind] and 'ВКЛ' or 'ВЫКЛ')
     end)
 end
-local rangeButton = row('Дальность: 1500 studs', true)
+local rangeButton = row('Дальность: 420 м • +140 м', true)
 rangeButton.Activated:Connect(function()
     if calibrating then return end
     automatic = false
@@ -115,7 +162,7 @@ autoButton.Activated:Connect(function()
     end)
 end)
 local status = row('Поиск объектов…', false, 40)
-row('Закрыть и удалить ESP', true).Activated:Connect(function() gui:Destroy() end)
+row('Выключить и удалить ESP', true).Activated:Connect(function() gui:Destroy() end)
 
 table.insert(connections, workspace.DescendantAdded:Connect(register))
 table.insert(connections, workspace.DescendantRemoving:Connect(function(object)
@@ -129,21 +176,32 @@ task.spawn(function()
         if i % 400 == 0 then task.wait() end
     end
 end)
-local function mark(object, part, kind)
+local function mark(object, part)
     local billboard = Instance.new('BillboardGui')
     billboard.Name = 'UAV_ESP_Marker'
-    billboard.Size = UDim2.fromOffset(180,28)
+    billboard.Size = UDim2.fromOffset(64,32)
     billboard.AlwaysOnTop = true
     billboard.Adornee = part
-    billboard.StudsOffsetWorldSpace = Vector3.new(0,3,0)
     billboard.Parent = gui
+    local dot = Instance.new('Frame')
+    dot.Name = 'Dot'
+    dot.AnchorPoint = Vector2.new(0.5,0.5)
+    dot.Position = UDim2.fromScale(0.5,0.5)
+    dot.Size = UDim2.fromOffset(4,4)
+    dot.BorderSizePixel = 0
+    dot.BackgroundTransparency = 0.15
+    dot.Parent = billboard
+    Instance.new('UICorner',dot).CornerRadius = UDim.new(1,0)
     local label = Instance.new('TextLabel')
-    label.Size = UDim2.fromScale(1,1)
+    label.Name = 'Distance'
+    label.Position = UDim2.new(0,0,0.5,4)
+    label.Size = UDim2.new(1,0,0,12)
     label.BackgroundTransparency = 1
-    label.TextColor3 = colors[kind]
-    label.TextStrokeTransparency = 0.25
-    label.TextSize = 14
-    label.Font = Enum.Font.GothamBold
+    label.TextColor3 = Color3.fromRGB(220,220,220)
+    label.TextTransparency = 0.3
+    label.TextStrokeTransparency = 0.65
+    label.TextSize = 10
+    label.Font = Enum.Font.Gotham
     label.Parent = billboard
     marks[object] = billboard
     return billboard
@@ -159,7 +217,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if fps < 28 then distance = math.max(300, math.floor(distance*0.8))
         elseif fps > 55 then distance = math.min(5000, distance+200) end
     end
-    rangeButton.Text = string.format('Дальность: %d studs • нажми +500',distance)
+    rangeButton.Text = string.format('Дальность: %d м • +140 м',math.floor(distance*METERS_PER_STUD+0.5))
     if not calibrating then autoButton.Text = automatic and 'Авто: ВКЛ • нажми выключить' or 'Автоподбор дальности' end
     local camera = workspace.CurrentCamera
     if not camera then return end
@@ -182,14 +240,25 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         end
     end
     table.sort(visible,function(a,b) return a.d < b.d end)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = player.Character and {player.Character,camera} or {camera}
     local keep, count = {}, math.min(#visible,48)
     for i=1,count do
         local item = visible[i]
         keep[item.object] = true
-        local billboard = marks[item.object] or mark(item.object,item.part,item.kind)
+        local billboard = marks[item.object] or mark(item.object,item.part)
         billboard.Adornee = item.part
         billboard.MaxDistance = distance
-        billboard.TextLabel.Text = string.format('%s • %d studs',names[item.kind],math.floor(item.d))
+        local _, onScreen = camera:WorldToViewportPoint(item.part.Position)
+        billboard.Enabled = onScreen
+        if onScreen then
+            local hit = workspace:Raycast(camera.CFrame.Position,
+                item.part.Position-camera.CFrame.Position,rayParams)
+            local unobstructed = not hit or hit.Instance == item.object or hit.Instance:IsDescendantOf(item.object)
+            billboard.Dot.BackgroundColor3 = unobstructed and clearColor or blockedColor
+            billboard.Distance.Text = string.format('%d м',math.floor(item.d*METERS_PER_STUD+0.5))
+        end
     end
     for object in pairs(marks) do if not keep[object] then clearMark(object) end end
     status.Text = string.format('FPS: %d • кандидатов: %d • меток: %d\nРаспознавание по именам',math.floor(fps),found,count)
