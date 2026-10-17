@@ -16,6 +16,7 @@ local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, uav = false}
 local candidates, marks, connections = {}, {}, {}
+local outlines, speedLabels, motion = {}, {}, {}
 local METERS_PER_STUD = 0.28
 local clearColor = Color3.fromRGB(70,220,105)
 local blockedColor = Color3.fromRGB(245,75,75)
@@ -40,6 +41,9 @@ local function register(object)
     if kind then candidates[object] = kind end
 end
 local function clearMark(object)
+    if outlines[object] then outlines[object]:Destroy(); outlines[object] = nil end
+    if speedLabels[object] then speedLabels[object]:Destroy(); speedLabels[object] = nil end
+    motion[object] = nil
     if marks[object] then marks[object]:Destroy(); marks[object] = nil end
 end
 local function cleanup()
@@ -203,6 +207,29 @@ local function mark(object, part)
     label.TextSize = 10
     label.Font = Enum.Font.Gotham
     label.Parent = billboard
+    local outline = Instance.new('Highlight')
+    outline.Name = 'ESP_Outline'
+    outline.Adornee = object
+    outline.FillTransparency = 1
+    outline.OutlineColor = Color3.new(1,1,1)
+    outline.OutlineTransparency = 0.2
+    outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    outline.Parent = object
+    outlines[object] = outline
+    local speed = Instance.new('TextLabel')
+    speed.Name = 'ESP_Speed'
+    speed.AnchorPoint = Vector2.new(0.5,1)
+    speed.Size = UDim2.fromOffset(100,16)
+    speed.BackgroundTransparency = 1
+    speed.TextColor3 = Color3.new(1,1,1)
+    speed.TextTransparency = 0.15
+    speed.TextStrokeTransparency = 0.65
+    speed.TextSize = 11
+    speed.Font = Enum.Font.Gotham
+    speed.Visible = false
+    speed.Parent = root
+    speedLabels[object] = speed
+    motion[object] = {part = part, position = part.Position, time = os.clock()}
     marks[object] = billboard
     return billboard
 end
@@ -248,6 +275,20 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         local item = visible[i]
         keep[item.object] = true
         local billboard = marks[item.object] or mark(item.object,item.part)
+        local sample = motion[item.object]
+        local now = os.clock()
+        local delta = now-sample.time
+        if sample.part ~= item.part then
+            sample.speed = nil
+        elseif delta >= 0.15 then
+            -- Position samples also cover anchored objects moved with PivotTo/CFrame.
+            local measured = (item.part.Position-sample.position).Magnitude/delta
+            sample.speed = sample.speed and (sample.speed*0.5+measured*0.5) or measured
+        end
+        if delta >= 0.15 or sample.part ~= item.part then
+            sample.position, sample.time, sample.part = item.part.Position, now, item.part
+        end
+        speedLabels[item.object].Text = sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч'
         billboard.Adornee = item.part
         billboard.MaxDistance = distance
         local _, onScreen = camera:WorldToViewportPoint(item.part.Position)
@@ -262,4 +303,41 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     end
     for object in pairs(marks) do if not keep[object] then clearMark(object) end end
     status.Text = string.format('FPS: %d • кандидатов: %d • меток: %d\nРаспознавание по именам',math.floor(fps),found,count)
+end))
+
+-- Reproject the top of the object's bounds every frame so the caption follows the camera.
+table.insert(connections, RunService.RenderStepped:Connect(function()
+    local camera = workspace.CurrentCamera
+    for object, label in pairs(speedLabels) do
+        label.Visible = false
+        local outline = outlines[object]
+        outline.Enabled = false
+        if camera and object:IsDescendantOf(workspace) then
+            local cf, size
+            if object:IsA('Model') then cf, size = object:GetBoundingBox()
+            else cf, size = object.CFrame, object.Size end
+            local center, onScreen = camera:WorldToViewportPoint(cf.Position)
+            outline.Enabled = onScreen
+            if onScreen then
+                local top, inFront = math.huge, true
+                for x=-1,1,2 do
+                    for y=-1,1,2 do
+                        for z=-1,1,2 do
+                            local corner = cf:PointToWorldSpace(Vector3.new(x*size.X/2,y*size.Y/2,z*size.Z/2))
+                            local point = camera:WorldToViewportPoint(corner)
+                            if point.Z <= 0 then inFront = false end
+                            top = math.min(top,point.Y)
+                        end
+                    end
+                end
+                if inFront then
+                    -- WorldToScreenPoint includes the top-bar inset, matching GUI AbsolutePosition.
+                    local screen = camera:WorldToScreenPoint(cf.Position)
+                    local inset = screen.Y-center.Y
+                    label.Position = UDim2.fromOffset(screen.X-root.AbsolutePosition.X,top+inset-root.AbsolutePosition.Y-4)
+                    label.Visible = true
+                end
+            end
+        end
+    end
 end))
