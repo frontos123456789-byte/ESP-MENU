@@ -166,31 +166,13 @@ autoButton.Activated:Connect(function()
         automatic, calibrating = true, false
     end)
 end)
-local function numberField(placeholder)
-    order = order+1
-    local field = Instance.new('TextBox')
-    field.LayoutOrder = order
-    field.Size = UDim2.new(1,-16,0,44)
-    field.Text = ''
-    field.PlaceholderText = placeholder
-    field.TextSize = 14
-    field.TextColor3 = Color3.new(1,1,1)
-    field.PlaceholderColor3 = Color3.fromRGB(190,190,190)
-    field.BackgroundColor3 = Color3.fromRGB(43,49,65)
-    field.ClearTextOnFocus = false
-    field.Parent = body
-    Instance.new('UICorner',field).CornerRadius = UDim.new(0,6)
-    return field
-end
-row('Упреждение: параметры оружия',false)
-local bulletSpeed = numberField('Скорость пули, м/с')
-local bulletDrop = numberField('Ускорение падения, м/с² (0 = нет)')
-local aimStatus = row('Введи оба параметра пули',false,40)
+row('AIM • Stinger-M',false)
+local aimStatus = row('Возьми Stinger-M и удерживай AIM',false,44)
 local aimButton = Instance.new('TextButton')
 aimButton.AnchorPoint = Vector2.new(1,1)
 aimButton.Position = UDim2.new(1,-16,1,-90)
 aimButton.Size = UDim2.fromOffset(112,54)
-aimButton.Text = 'Удерживать\nнаведение'
+aimButton.Text = 'Удерживать\nAIM • Stinger'
 aimButton.TextSize = 14
 aimButton.TextColor3 = Color3.new(1,1,1)
 aimButton.BackgroundColor3 = Color3.fromRGB(43,49,65)
@@ -204,6 +186,7 @@ local function releaseAim()
 end
 aimButton.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if heldInput then return end
         heldInput = input
         aimButton.BackgroundColor3 = Color3.fromRGB(55,100,75)
     end
@@ -391,91 +374,130 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
     end
 end))
 
--- Constant-speed projectile with downward acceleration; constant-velocity target.
--- No drag, wind or inherited shooter velocity: these require the weapon's real model.
-local function intercept(relative, velocity, speed, gravity)
-    local acceleration = Vector3.new(0,-gravity,0)
-    local function residual(t)
-        return (relative+velocity*t-acceleration*(0.5*t*t)).Magnitude-speed*t
-    end
-    local previousTime = 0
-    for step=1,120 do
-        local t = step*0.05
-        if residual(t) <= 0 then
-            local low, high = previousTime,t
-            for _=1,18 do
-                local mid = (low+high)*0.5
-                if residual(mid)>0 then low=mid else high=mid end
-            end
-            local flightTime = (low+high)*0.5
-            return relative+velocity*flightTime-acceleration*(0.5*flightTime*flightTime)
-        end
-        previousTime=t
-    end
-end
-local function parameter(field)
-    return tonumber((field.Text:gsub(',','.')))
-end
--- Run after Roblox's camera controller. Releasing the button restores normal camera updates.
+-- Stinger uses the game's native target locking. Keep the camera on the current
+-- target; do not lead a homing missile, bypass readiness or send launch remotes.
 local aimBinding = 'UAV_ESP_HoldAim'
+local aimElapsed = 1
+local lockedPart
+local function stingerRange(tool)
+    local storage = game:GetService('ReplicatedStorage')
+    local folder = storage:FindFirstChild('StingerFolder') or tool:FindFirstChild('StingerFolder')
+    local value = folder and folder:FindFirstChild('StingerRange')
+    if value and (value:IsA('NumberValue') or value:IsA('IntValue')) then
+        local range = value.Value
+        if range==range and range>0 and range<math.huge then return range,true end
+    end
+    return 5000,false
+end
+local function targetPart(object)
+    if not object or not object:IsDescendantOf(workspace) then return end
+    if object:IsA('Model') then
+        if object:FindFirstChildOfClass('Humanoid') then return end
+        return object.PrimaryPart or object:FindFirstChildWhichIsA('BasePart',true)
+    elseif object:IsA('BasePart') then return object end
+end
+local function blockedAncestor(object,character)
+    local ancestor=object.Parent
+    while ancestor and ancestor~=workspace do
+        if ancestor==character or ancestor:IsA('Tool') then return true end
+        if ancestor:IsA('Model') and ancestor:FindFirstChildOfClass('Humanoid') then return true end
+        ancestor=ancestor.Parent
+    end
+    return false
+end
+local function clearAimTarget()
+    lockedTarget,lockedPart=nil,nil
+end
 gui.Destroying:Connect(function()
     releaseAim()
+    clearAimTarget()
     RunService:UnbindFromRenderStep(aimBinding)
 end)
-RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function()
+RunService:BindToRenderStep(aimBinding,Enum.RenderPriority.Camera.Value+1,function(dt)
     if not alive then return end
-    local speed, gravity = parameter(bulletSpeed),parameter(bulletDrop)
-    if not speed or speed<=0 or speed>10000 or not gravity or gravity<0 or gravity>10000 then
-        aimStatus.Text = 'Введи скорость > 0 и падение ≥ 0'
-        lockedTarget = nil
+    local character=player.Character
+    local tool=character and character:FindFirstChildOfClass('Tool')
+    if not tool or tool.Name~='Stinger-M' then
+        clearAimTarget()
+        aimStatus.Text='Возьми Stinger-M в руки'
         return
     end
     if not heldInput or UserInputService:GetFocusedTextBox() then
-        aimStatus.Text = 'Удерживай кнопку • цель у прицела'
-        lockedTarget = nil
+        clearAimTarget()
+        aimElapsed=1
+        aimStatus.Text='Удерживай AIM • запуск штатной кнопкой'
         return
     end
-    local camera = workspace.CurrentCamera
-    local character = player.Character
-    local head = character and character:FindFirstChild('Head')
-    if not camera or not head then return end
-    local origin = head.Position
-    -- Prefer a conventional muzzle attachment; fall back to the character's head.
-    local tool = character:FindFirstChildOfClass('Tool')
-    local muzzle = tool and (tool:FindFirstChild('Muzzle',true) or tool:FindFirstChild('MuzzleAttachment',true))
-    if muzzle then
-        if muzzle:IsA('Attachment') then origin=muzzle.WorldPosition
-        elseif muzzle:IsA('BasePart') then origin=muzzle.Position end
-    end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {character,camera}
-    local center = camera.ViewportSize*0.5
-    local radius = math.min(camera.ViewportSize.X,camera.ViewportSize.Y)*0.22
-    local best, bestDistance = nil, radius
-    for object, sample in pairs(motion) do
-        local part = sample.part
-        if part and part:IsDescendantOf(workspace) and sample.velocity then
-            local kind = candidates[object]
-            local point,onScreen = camera:WorldToViewportPoint(part.Position)
-            local screenDistance = (Vector2.new(point.X,point.Y)-center).Magnitude
-            if kind and (enabled[kind] or enabled.uav) and onScreen and screenDistance<=radius
-                and (part.Position-origin).Magnitude<=distance then
-                local hit = workspace:Raycast(origin,part.Position-origin,params)
-                if not hit or hit.Instance==object or hit.Instance:IsDescendantOf(object) then
-                    if object==lockedTarget then best=object; break end
-                    if screenDistance<bestDistance then best,bestDistance=object,screenDistance end
+    local camera=workspace.CurrentCamera
+    local head=character:FindFirstChild('Head')
+    if not camera or not head then clearAimTarget();return end
+    local humanoid=character:FindFirstChildOfClass('Humanoid')
+    if humanoid and humanoid.Health<=0 then releaseAim();clearAimTarget();return end
+    aimElapsed=aimElapsed+dt
+    -- Full selection/occlusion work runs at 10 Hz; camera tracking runs every frame.
+    if aimElapsed>=0.1 then
+        aimElapsed=0
+        local range,knownRange=stingerRange(tool)
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances={character,camera}
+        local function valid(object,part)
+            if not part or not part:IsDescendantOf(workspace) or blockedAncestor(object,character) then return false end
+            if (part.Position-head.Position).Magnitude>range then return false end
+            local direction=part.Position-camera.CFrame.Position
+            if direction.Magnitude<0.001 then return false end
+            local hit=workspace:Raycast(camera.CFrame.Position,direction,params)
+            return not hit or hit.Instance==object or hit.Instance:IsDescendantOf(object)
+        end
+        -- Do not jump between nearby drones while the native lock is building.
+        lockedPart=targetPart(lockedTarget)
+        if not lockedTarget or not valid(lockedTarget,lockedPart) then
+            clearAimTarget()
+            local center=camera.ViewportSize*0.5
+            local radius=math.min(camera.ViewportSize.X,camera.ViewportSize.Y)*0.25
+            local bestDistance=radius
+            local checked={}
+            local function consider(object)
+                if checked[object] then return end
+                checked[object]=true
+                local part=targetPart(object)
+                if not part then return end
+                local point,onScreen=camera:WorldToViewportPoint(part.Position)
+                if not onScreen then return end
+                local screenDistance=(Vector2.new(point.X,point.Y)-center).Magnitude
+                if screenDistance<bestDistance and valid(object,part) then
+                    lockedTarget,lockedPart=object,part
+                    bestDistance=screenDistance
                 end
             end
+            local droneFolder=workspace:FindFirstChild('Drones')
+            if droneFolder then
+                for _,object in ipairs(droneFolder:GetChildren()) do
+                    if object:IsA('Folder') then
+                        for _,child in ipairs(object:GetChildren()) do consider(child) end
+                    else consider(object) end
+                end
+            end
+            -- Name-based fallback for targets outside the known drone container.
+            for object in pairs(candidates) do
+                local ancestor,nested=object.Parent,false
+                while ancestor and ancestor~=workspace do
+                    if candidates[ancestor] or ancestor==droneFolder then nested=true;break end
+                    ancestor=ancestor.Parent
+                end
+                if not nested then consider(object) end
+            end
+        end
+        if lockedTarget then
+            aimStatus.Text='Камера на цели • дождись READY у оружия'
+        else
+            aimStatus.Text=knownRange and 'Нет видимой цели в дальности Stinger' or 'Нет видимой цели • поиск до 1400 м'
         end
     end
-    lockedTarget=best
-    if not best then aimStatus.Text='Нет видимой цели у прицела'; return end
-    local sample=motion[best]
-    local direction=intercept(sample.part.Position-origin,sample.velocity,speed/METERS_PER_STUD,gravity/METERS_PER_STUD)
-    if not direction or direction.Magnitude<0.001 then
-        aimStatus.Text='Нет решения до 6 с полёта'; return
-    end
-    camera.CFrame=CFrame.lookAt(camera.CFrame.Position,camera.CFrame.Position+direction)
-    aimStatus.Text='Наведение • расчётное упреждение'
+    if lockedPart and lockedPart:IsDescendantOf(workspace) then
+        local direction=lockedPart.Position-camera.CFrame.Position
+        if direction.Magnitude>0.001 then
+            camera.CFrame=CFrame.lookAt(camera.CFrame.Position,lockedPart.Position)
+        end
+    else clearAimTarget() end
 end)
