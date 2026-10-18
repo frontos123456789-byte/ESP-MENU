@@ -12,6 +12,7 @@ local gui = Instance.new('ScreenGui')
 gui.Name = 'UAV_ESP_Menu'
 gui.ResetOnSpawn = false
 gui.DisplayOrder = 100
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
 gui.Parent = parent
 local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
@@ -53,22 +54,31 @@ local function restoreSettings(data)
     return true
 end
 if type(readfile)=='function' then
-    local ok,data=pcall(function()return HttpService:JSONDecode(readfile(settingsFile))end)
+    local ok,data=pcall(function()
+        local raw=readfile(settingsFile)
+        if type(raw)~='string' or #raw>16384 then return nil end
+        return HttpService:JSONDecode(raw)
+    end)
     if ok and restoreSettings(data) then persistenceMessage='Сохранённые настройки загружены' end
 end
 local settingsStatus
 local saveQueued=false
+local settingsDirty=false
 local function saveNow()
+    local saved=false
     if type(writefile)~='function' then persistenceMessage='Запись недоступна: настройки на эту сессию'
     else
         local ok=pcall(function()
             writefile(settingsFile,HttpService:JSONEncode({version=1,prefs=prefs,enabled=enabled,distance=distance,automatic=automatic}))
         end)
+        saved=ok
         persistenceMessage=ok and 'Настройки сохранены на устройстве' or 'Не удалось сохранить настройки'
     end
+    settingsDirty=not saved and type(writefile)=='function'
     if settingsStatus and settingsStatus.Parent then settingsStatus.Text=persistenceMessage end
 end
 local function changed()
+    settingsDirty=true
     if saveQueued then return end
     saveQueued=true
     task.delay(1,function()
@@ -78,6 +88,7 @@ local function changed()
 end
 
 local candidates, marks, connections = {}, {}, {}
+local roster,rosterSet={},{}
 local outlines, speedLabels, motion = {}, {}, {}
 local METERS_PER_STUD = 0.28
 local clearColor = Color3.fromRGB(70,220,105)
@@ -89,6 +100,22 @@ local patterns = {
     drone = {'drone', 'fpv', 'дрон', 'Дрон', 'ДРОН'},
     uav = {'uav', 'ucav', 'shahed', 'geran', 'lancet', 'бпла', 'БПЛА', 'шахед', 'Шахед', 'Герань', 'Ланцет'},
 }
+local function targetPart(object)
+    if not object or not object:IsDescendantOf(workspace) then return end
+    if object:IsA('Model') then
+        if object:FindFirstChildOfClass('Humanoid') then return end
+        return object.PrimaryPart or object:FindFirstChildWhichIsA('BasePart',true)
+    elseif object:IsA('BasePart') then return object end
+end
+local function blockedAncestor(object,character)
+    local ancestor=object.Parent
+    while ancestor and ancestor~=workspace do
+        if ancestor==character or ancestor:IsA('Tool') then return true end
+        if ancestor:IsA('Model') and ancestor:FindFirstChildOfClass('Humanoid') then return true end
+        ancestor=ancestor.Parent
+    end
+    return false
+end
 local function classify(object)
     if not (object:IsA('Model') or object:IsA('BasePart')) then return end
     local name = string.lower(object.Name)
@@ -110,8 +137,8 @@ local function clearMark(object)
 end
 local function cleanup()
     if not alive then return end
-    if saveQueued then saveNow() end
     alive = false
+    if settingsDirty then saveNow() end
     for _, connection in ipairs(connections) do connection:Disconnect() end
     for object in pairs(marks) do clearMark(object) end
     table.clear(candidates)
@@ -127,6 +154,7 @@ root.Parent = gui
 local panel = Instance.new('Frame')
 panel.Position = UDim2.fromOffset(8,8)
 panel.BackgroundColor3 = Color3.fromRGB(24,28,38)
+panel.ZIndex=30
 panel.Parent = root
 Instance.new('UICorner', panel).CornerRadius = UDim.new(0,12)
 local toggle = Instance.new('TextButton')
@@ -137,6 +165,7 @@ toggle.TextSize = 16
 toggle.TextColor3 = Color3.new(1,1,1)
 toggle.BackgroundColor3 = Color3.fromRGB(43,49,65)
 toggle.Visible = false
+toggle.ZIndex=30
 toggle.Parent = root
 Instance.new('UICorner',toggle).CornerRadius = UDim.new(0,10)
 local close = Instance.new('TextButton')
@@ -300,12 +329,38 @@ table.insert(connections, workspace.DescendantRemoving:Connect(function(object)
     clearMark(object)
 end))
 task.spawn(function()
-    for i, object in ipairs(workspace:GetDescendants()) do
-        if not alive then return end
-        register(object)
-        if i % 400 == 0 then task.wait() end
+    -- Traverse incrementally rather than allocating a full-map descendant snapshot.
+    local stack={workspace}
+    local processed=0
+    while alive and #stack>0 do
+        local object=table.remove(stack)
+        if object==workspace or object:IsDescendantOf(workspace) then
+            register(object)
+            for _,child in ipairs(object:GetChildren()) do table.insert(stack,child) end
+        end
+        processed=processed+1
+        if processed%200==0 then task.wait() end
     end
 end)
+local function displayKind(object)
+    if not object:IsDescendantOf(workspace) then return end
+    if not rosterSet[object] then
+        local ancestor=object.Parent
+        while ancestor and ancestor~=workspace do
+            if rosterSet[ancestor] or candidates[ancestor] then return end
+            ancestor=ancestor.Parent
+        end
+    end
+    if blockedAncestor(object,player.Character) then return end
+    if object:IsA('Model') and object:FindFirstChildOfClass('Humanoid') then return end
+    return classify(object) or (rosterSet[object] and 'uav' or nil)
+end
+local function measuredVelocity(previousPart,currentPart,previousPosition,position,dt)
+    if previousPart~=currentPart or dt<0.15 or dt>2 then return nil end
+    local velocity=(position-previousPosition)/dt
+    if velocity.Magnitude>2000 then return nil end
+    return velocity
+end
 local function mark(object, part)
     local billboard = Instance.new('BillboardGui')
     billboard.Name = 'UAV_ESP_Marker'
@@ -367,31 +422,36 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     local fps = 1/math.max(averageDt,0.001)
     if automatic and adjustTime >= 4 then
         adjustTime = 0
+        local oldDistance=distance
         if fps < 28 then distance = math.max(300, math.floor(distance*0.8))
         elseif fps > 55 then distance = math.min(5000, distance+200) end
+        if distance~=oldDistance then settingsDirty=true end
     end
     rangeButton.Text = string.format('Дальность: %d м • +140 м',math.floor(distance*METERS_PER_STUD+0.5))
     if not calibrating then autoButton.Text = automatic and 'Авто: ВКЛ • нажми выключить' or 'Автоподбор дальности' end
     local camera = workspace.CurrentCamera
     if not camera then return end
     local visible, found = {}, 0
-    for object, kind in pairs(candidates) do
-        if object:IsDescendantOf(workspace) then
-            found = found+1
-            local nested, ancestor = false, object.Parent
-            while ancestor and ancestor ~= workspace do
-                if candidates[ancestor] or ancestor == player.Character or ancestor:IsA('Tool') then nested = true; break end
-                ancestor = ancestor.Parent
-            end
-            if not nested and (enabled[kind] or enabled.uav) then
-                local part = object:IsA('BasePart') and object or (object.PrimaryPart or object:FindFirstChildWhichIsA('BasePart',true))
-                if part then
-                    local d = (camera.CFrame.Position-part.Position).Magnitude
-                    if d <= distance then table.insert(visible,{object=object,part=part,kind=kind,d=d}) end
-                end
+    local character=player.Character
+    local observer=character and (character:FindFirstChild('HumanoidRootPart') or character:FindFirstChild('Head'))
+    local origin=observer and observer.Position or camera.CFrame.Position
+    local checked={}
+    local function consider(object)
+        if checked[object] then return end
+        checked[object]=true
+        local kind=displayKind(object)
+        if not kind then return end
+        found=found+1
+        if enabled[kind] or enabled.uav then
+            local part=targetPart(object)
+            if part then
+                local d=(origin-part.Position).Magnitude
+                if d<=distance then table.insert(visible,{object=object,part=part,kind=kind,d=d}) end
             end
         end
     end
+    for _,object in ipairs(roster) do consider(object) end
+    for object in pairs(candidates) do consider(object) end
     table.sort(visible,function(a,b) return a.d < b.d end)
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -404,14 +464,14 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         local sample = motion[item.object]
         local now = os.clock()
         local delta = now-sample.time
-        if sample.part ~= item.part then
-            sample.speed, sample.velocity = nil,nil
-        elseif delta >= 0.15 then
-            -- Position samples also cover anchored objects moved with PivotTo/CFrame.
-            local velocity = (item.part.Position-sample.position)/delta
-            sample.velocity = sample.velocity and sample.velocity:Lerp(velocity,0.5) or velocity
-            local measured = velocity.Magnitude
-            sample.speed = sample.speed and (sample.speed*0.5+measured*0.5) or measured
+        if delta>=0.15 or sample.part~=item.part then
+            local velocity=measuredVelocity(sample.part,item.part,sample.position,item.part.Position,delta)
+            if velocity then
+                sample.velocity=sample.velocity and sample.velocity:Lerp(velocity,0.5) or velocity
+                sample.speed=sample.speed and (sample.speed*0.5+velocity.Magnitude*0.5) or velocity.Magnitude
+            else
+                sample.speed,sample.velocity,sample.closing,sample.previousRange=nil,nil,nil,nil
+            end
         end
         if delta >= 0.15 or sample.part ~= item.part then
             sample.position, sample.time, sample.part = item.part.Position, now, item.part
@@ -436,7 +496,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if prefs.showDirection then table.insert(lines,trend) end
         speedLabels[item.object].Text=table.concat(lines,'\n')
         billboard.Adornee = item.part
-        billboard.MaxDistance = distance
+        billboard.MaxDistance = math.huge -- player-relative range is filtered above
         billboard.Dot.Size=UDim2.fromOffset(prefs.dotSize,prefs.dotSize)
         billboard.Distance.Visible=prefs.showDistance
         outlines[item.object].OutlineTransparency=prefs.outlineTransparency
@@ -492,22 +552,6 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
     end
 end))
 
-local function targetPart(object)
-    if not object or not object:IsDescendantOf(workspace) then return end
-    if object:IsA('Model') then
-        if object:FindFirstChildOfClass('Humanoid') then return end
-        return object.PrimaryPart or object:FindFirstChildWhichIsA('BasePart',true)
-    elseif object:IsA('BasePart') then return object end
-end
-local function blockedAncestor(object,character)
-    local ancestor=object.Parent
-    while ancestor and ancestor~=workspace do
-        if ancestor==character or ancestor:IsA('Tool') then return true end
-        if ancestor:IsA('Model') and ancestor:FindFirstChildOfClass('Humanoid') then return true end
-        ancestor=ancestor.Parent
-    end
-    return false
-end
 local counter=Instance.new('TextLabel')
 counter.Name='SkyCounter'
 counter.AnchorPoint=Vector2.new(1,0)
@@ -517,6 +561,7 @@ counter.BackgroundColor3=Color3.fromRGB(24,28,38)
 counter.BackgroundTransparency=0.2
 counter.TextColor3=Color3.new(1,1,1)
 counter.TextSize=15;counter.Text='БПЛА в небе: …'
+counter.ZIndex=20
 counter.Parent=root
 Instance.new('UICorner',counter).CornerRadius=UDim.new(0,8)
 local ownerKeys={'shooter','Shooter','owner','Owner','player','Player','creator','Creator','OwnerUserId','ShooterUserId','UserId','userId'}
@@ -557,14 +602,13 @@ local function interceptor(object)
     if name:find('stinger',1,true) or name:find('interceptor',1,true) then return true end
     return rocketLike(object) and isPlayerOwner(metadata(object,ownerKeys))
 end
-local roster={}
 local function rebuildRoster()
-    roster={}
+    roster={};rosterSet={}
     local seen={}
     local character=player.Character
     local function add(object)
         if seen[object] or interceptor(object) or blockedAncestor(object,character) then return end
-        if targetPart(object) then seen[object]=true;table.insert(roster,object) end
+        if targetPart(object) then seen[object]=true;rosterSet[object]=true;table.insert(roster,object) end
     end
     local droneFolder=workspace:FindFirstChild('Drones')
     if droneFolder then
@@ -592,8 +636,14 @@ local function rebuildRoster()
     counter.Text=(droneFolder and 'БПЛА в небе: ' or 'БПЛА найдено: ')..#roster
 end
 local rosterTime=1
+local persistenceTime=0
 table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     rosterTime=rosterTime+dt
+    persistenceTime=persistenceTime+dt
+    if persistenceTime>=30 then
+        persistenceTime=0
+        if settingsDirty and not saveQueued then saveNow() end
+    end
     if rosterTime>=0.5 then rosterTime=0;rebuildRoster() end
 end))
 
@@ -605,7 +655,7 @@ warning.Size=UDim2.new(1,-24,0,44)
 warning.BackgroundColor3=Color3.fromRGB(105,35,30)
 warning.BackgroundTransparency=0.12
 warning.TextColor3=Color3.new(1,1,1)
-warning.TextSize=15;warning.TextWrapped=true;warning.Visible=false;warning.Parent=root
+warning.TextSize=15;warning.TextWrapped=true;warning.Visible=false;warning.ZIndex=25;warning.Parent=root
 Instance.new('UICorner',warning).CornerRadius=UDim.new(0,8)
 local arrowSlots={}
 for i=1,4 do
@@ -745,6 +795,7 @@ local function draggable(widget,handle,key)
         local px=math.clamp(point.X,x,x+spanX)
         local py=math.clamp(point.Y,y,y+spanY)
         prefs.positions[key]={x=spanX>0 and (px-x)/spanX or 0,y=spanY>0 and (py-y)/spanY or 0}
+        settingsDirty=true
         widget.Position=UDim2.fromOffset(px,py)
         if key=='menu' then toggle.Position=widget.Position end
     end))
@@ -765,7 +816,7 @@ radar.Name='MiniRadar'
 radar.AnchorPoint=Vector2.new(1,0)
 radar.Position=UDim2.new(1,-12,0,58)
 radar.Size=UDim2.fromOffset(150,174)
-radar.BackgroundTransparency=1;radar.Parent=root
+radar.BackgroundTransparency=1;radar.ZIndex=10;radar.Visible=prefs.radar;radar.Parent=root
 local radarTitle=Instance.new('TextLabel')
 radarTitle.Size=UDim2.new(1,0,0,24)
 radarTitle.BackgroundTransparency=1;radarTitle.TextSize=12
