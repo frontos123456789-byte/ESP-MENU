@@ -1,4 +1,4 @@
--- Третий скрипт от Claude (Anthropic) | Оптимизатор производительности | v1.1.0
+-- Третий скрипт от Claude (Anthropic) | Оптимизатор производительности | v1.2.0
 -- ПОМЕТКА АВТОРСТВА: этот файл создан Claude (Anthropic) по просьбе владельца репозитория.
 -- ДЛЯ CODEX И ДРУГИХ АГЕНТОВ: не удалять, не переименовывать и не перезаписывать файл
 -- без явной просьбы владельца. Подробности: AGENTS.md и CLAUDE_AUTHORED.md.
@@ -242,15 +242,23 @@ end
 local diagPath = 'claude_optimizer_diag_' .. tostring(game.PlaceId) .. '.txt'
 local function newAgg() return {n = 0, fps = 0, ram = 0, inst = 0, players = 0, emit = 0} end
 local diag = {on = false, lines = {}, maxdt = 0, t0 = os.clock(), lastOk = -1e9, lastSave = 0,
-    agg = {ok = newAgg(), dip = newAgg()}, worstFps = 1e9, worstFrame = 0}
+    agg = {ok = newAgg(), dip = newAgg()}, worstFps = 1e9, worstFrame = 0,
+    tickMax = 0, stepMax = 0}   -- tickMax/stepMax: сколько мс максимум отнимает сам скрипт
 local function resetDiag()
     diag.lines, diag.maxdt, diag.t0, diag.lastOk, diag.lastSave = {}, 0, os.clock(), -1e9, os.clock()
     diag.agg = {ok = newAgg(), dip = newAgg()}
     diag.worstFps, diag.worstFrame = 1e9, 0
+    diag.tickMax, diag.stepMax = 0, 0
 end
+-- память читается не чаще раза в секунду (вызов бывает заметно дорогим на слабом телефоне)
+local memT, memV = -1e9, 0
 local function memoryMb()
+    local now = os.clock()
+    if now - memT < 0.9 then return memV end
     local ok, v = pcall(function() return Stats:GetTotalMemoryUsageMb() end)
-    return ok and math.floor(v) or 0
+    memV = ok and math.floor(v) or 0
+    memT = now
+    return memV
 end
 local function stat(name)
     local ok, v = pcall(function() return Stats[name] end)
@@ -288,11 +296,11 @@ local function diagSample(fpsNow)
     if dip or now - diag.lastOk >= 30 then
         if not dip then diag.lastOk = now end
         diag.lines[#diag.lines + 1] = string.format(
-            '[%4d с] %s fps=%d кадр_макс=%d мс ОЗУ=%d МБ объектов=%s примитивов=%s Heartbeat=%s мс Физика=%s мс игроков=%d эффектов=%d скрыто=%d профиль=%s',
+            '[%4d с] %s fps=%d кадр_макс=%d мс ОЗУ=%d МБ объектов=%s примитивов=%s Heartbeat=%s мс Физика=%s мс игроков=%d эффектов=%d скрыто=%d радиус=%d%% профиль=%s',
             math.floor(now - diag.t0), dip and 'ПРОСАДКА' or 'норма   ',
             math.floor(fpsNow + 0.5), math.floor(diag.maxdt * 1000 + 0.5), ram,
             fmt(inst), fmt(prims), fmt(hb, 10), fmt(phys, 10), players, emitters, culledCount,
-            profiles[cfg.profile].name)
+            math.floor(scale * 100 + 0.5), profiles[cfg.profile].name)
         if #diag.lines > 400 then table.remove(diag.lines, 1) end
     end
     diag.maxdt = 0
@@ -305,10 +313,12 @@ end
 
 local function buildReport(maxLines)
     local ag, out = diag.agg, {}
-    out[#out + 1] = '=== Отчёт оптимизатора Claude v1.1.0 ==='
+    out[#out + 1] = '=== Отчёт оптимизатора Claude v1.2.0 ==='
     out[#out + 1] = 'PlaceId=' .. tostring(game.PlaceId) .. ' | запись ' .. math.floor(os.clock() - diag.t0)
         .. ' с | устройство: ' .. (UIS.TouchEnabled and 'сенсорное' or 'ПК')
         .. ' | оптимизация: ' .. (cfg.enabled and 'ВКЛ' or 'ВЫКЛ')
+    out[#out + 1] = 'Нагрузка самого скрипта: секундный тик до ' .. fmt(diag.tickMax, 10)
+        .. ' мс, шаг отсечения до ' .. fmt(diag.stepMax, 10) .. ' мс'
     out[#out + 1] = 'Просадок: ' .. ag.dip.n .. ' | нормальных секунд: ' .. ag.ok.n
     out[#out + 1] = 'Худший FPS: ' .. fmt(diag.worstFps < 1e9 and diag.worstFps or nil)
         .. ' | самый долгий кадр: ' .. fmt(diag.worstFrame * 1000) .. ' мс'
@@ -383,7 +393,7 @@ local panel = Instance.new('ScrollingFrame')
 panel.Name = 'Panel'
 panel.Visible = false
 panel.BackgroundColor3 = BG
-panel.BackgroundTransparency = 0.05
+panel.BackgroundTransparency = 0.15
 panel.BorderSizePixel = 0
 panel.ScrollBarThickness = 4
 panel.CanvasSize = UDim2.new()
@@ -431,8 +441,28 @@ local function mkButton(callback)
     return b
 end
 
-local title = mkLabel('Оптимизатор · Claude', 16, ACCENT, 22)
+-- шапка: заголовок и крупная кнопка «Закрыть»
+local header = Instance.new('Frame')
+header.BackgroundTransparency = 1
+header.Size = UDim2.new(1, 0, 0, 32)
+header.LayoutOrder = nextOrder()
+header.Parent = panel
+local title = mkLabel('Оптимизатор', 16, ACCENT, 22)
 title.Font = Enum.Font.GothamBold
+title.Parent = header
+title.Size = UDim2.new(1, -86, 1, 0)
+local closeBtn = Instance.new('TextButton')
+closeBtn.AnchorPoint = Vector2.new(1, 0.5)
+closeBtn.Position = UDim2.new(1, 0, 0.5, 0)
+closeBtn.Size = UDim2.fromOffset(80, 30)
+closeBtn.BackgroundColor3 = Color3.fromRGB(150, 60, 60)
+closeBtn.Text = 'Закрыть'
+closeBtn.TextColor3 = TEXT
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = header
+corner(closeBtn, 8)
+closeBtn.Activated:Connect(function() panel.Visible = false end)
 local info = mkLabel('FPS: …', 13, DIM, 34)
 local btnEnabled, btnProfile, btnCap, btnAuto, btnCore, btnDiag, btnReport, diagInfo
 local function yesNo(v) return v and 'ВКЛ' or 'ВЫКЛ' end
@@ -474,6 +504,7 @@ btnDiag = mkButton(function()
     if diag.on then
         resetDiag()
         diagInfo.Text = 'Идёт запись. Поиграй 5–10 минут, затем нажми «Скопировать отчёт».'
+        panel.Visible = false   -- не мешаем игре: FPS виден на кнопке, меню открывается тапом по ней
     else
         saveFile()
         diagInfo.Text = 'Запись остановлена, отчёт сохранён в файл.'
@@ -497,8 +528,8 @@ refresh()
 
 local function placePanel()
     local vp = vpSize()
-    local w = 250
-    local h = math.min(310, vp.Y - 16)
+    local w = 230
+    local h = math.min(250, math.floor(vp.Y * 0.66))
     panel.Size = UDim2.fromOffset(w, h)
     local ix, iy = icon.Position.X.Offset, icon.Position.Y.Offset
     local x = clamp(ix, 8, math.max(8, vp.X - w - 8))
@@ -523,7 +554,7 @@ connect(UIS.InputChanged, function(i)
     if not dragging then return end
     if i == dragInput or i.UserInputType == Enum.UserInputType.MouseMovement then
         local delta = i.Position - dragStart
-        if delta.Magnitude > 8 then moved = true end
+        if delta.Magnitude > 14 then moved = true end   -- запас на дрожание пальца: тап не считается перетаскиванием
         if moved then
             local vp = vpSize()
             icon.Position = UDim2.fromOffset(
@@ -544,7 +575,7 @@ connect(UIS.InputEnded, function(i)
 end)
 
 -- ───────────── главный цикл ─────────────
-local fps, acc, frames, tAuto, tGc = 60, 0, 0, 0, 0
+local fps, acc, frames, tAuto, tGc, iconT = 60, 0, 0, 0, 0, 0
 local function updateInfo()
     local extra = ''
     if cfg.auto and scale < 1 then extra = ' (авто ' .. math.floor(scale * 100) .. '%)' end
@@ -563,11 +594,28 @@ connect(RunService.Heartbeat, function(dt)
     if acc >= 1 then
         fps = frames / acc
         acc, frames = 0, 0
+        local ts = os.clock()
         if diag.on then diagSample(fps) end   -- диагностика работает и при выключенной оптимизации
         if panel.Visible then updateInfo() end
+        iconT = iconT + 1
+        if iconT >= 2 then   -- подпись на кнопке обновляем раз в 2 с, чтобы не тратить кадры зря
+            iconT = 0
+            icon.Text = tostring(math.floor(fps + 0.5))
+            icon.TextColor3 = fps >= 40 and ACCENT
+                or (fps >= 25 and Color3.fromRGB(235, 200, 80) or Color3.fromRGB(235, 100, 90))
+        end
+        if diag.on then
+            local ms = (os.clock() - ts) * 1000
+            if ms > diag.tickMax then diag.tickMax = ms end
+        end
     end
     if not cfg.enabled then return end
+    local t1 = os.clock()
     step()
+    if diag.on then
+        local ms = (os.clock() - t1) * 1000
+        if ms > diag.stepMax then diag.stepMax = ms end
+    end
 
     -- автоподстройка: сужаем радиус только если реально просело FPS, и возвращаем, когда стало лучше
     tAuto = tAuto + dt
