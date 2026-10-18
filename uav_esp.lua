@@ -17,7 +17,7 @@ local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, uav = false}
 local HttpService=game:GetService('HttpService')
-local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,positions={menu={x=0,y=0},counter={x=1,y=0}}}
+local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,radarSize=150,radarTransparency=0.25,positions={menu={x=0,y=0},counter={x=1,y=0},radar={x=1,y=0.2}}}
 local settingsFile='uav_esp_settings_'..tostring(game.PlaceId)..'.json'
 local persistenceMessage='Настройки: только текущая сессия'
 local function finite(value,low,high)
@@ -36,8 +36,10 @@ local function restoreSettings(data)
     end
     if type(data.prefs)=='table' then
         if finite(data.prefs.radarMeters,100,1000) then prefs.radarMeters=math.floor(data.prefs.radarMeters) end
+        if finite(data.prefs.radarSize,120,240) then prefs.radarSize=math.floor(data.prefs.radarSize) end
+        if finite(data.prefs.radarTransparency,0,0.9) then prefs.radarTransparency=data.prefs.radarTransparency end
         if type(data.prefs.positions)=='table' then
-            for _,key in ipairs({'menu','counter'}) do
+            for _,key in ipairs({'menu','counter','radar'}) do
                 local pos=data.prefs.positions[key]
                 if type(pos)=='table' and finite(pos.x,0,1) and finite(pos.y,0,1) then prefs.positions[key]={x=pos.x,y=pos.y} end
             end
@@ -272,6 +274,20 @@ radarRangeText()
 radarRangeButton.Activated:Connect(function()
     prefs.radarMeters=prefs.radarMeters>=1000 and 100 or math.min(1000,prefs.radarMeters+100)
     radarRangeText();changed()
+end)
+local radarSizeButton=row('',true)
+local function radarSizeText()radarSizeButton.Text='Размер радара: '..prefs.radarSize..' px • +30'end
+radarSizeText()
+radarSizeButton.Activated:Connect(function()
+    prefs.radarSize=prefs.radarSize>=240 and 120 or math.min(240,prefs.radarSize+30)
+    radarSizeText();changed()
+end)
+local radarOpacityButton=row('',true)
+local function radarOpacityText()radarOpacityButton.Text='Прозрачность фона радара: '..math.floor(prefs.radarTransparency*100+0.5)..'%'end
+radarOpacityText()
+radarOpacityButton.Activated:Connect(function()
+    prefs.radarTransparency=prefs.radarTransparency>=0.89 and 0 or math.min(0.9,math.floor(prefs.radarTransparency*10+1.5)/10)
+    radarOpacityText();changed()
 end)
 row('Сохранить настройки сейчас',true).Activated:Connect(saveNow)
 settingsStatus=row(persistenceMessage,false,44)
@@ -704,7 +720,8 @@ local function widgetPoint(pos,width,height,widgetWidth,widgetHeight)
 end
 local function draggable(widget,handle,key)
     widget.AnchorPoint=Vector2.new(0,0)
-    handle.Active=true
+    local handles=type(handle)=='table' and handle or {handle}
+    for _,surface in ipairs(handles) do surface.Active=true end
     local activeInput,startPointer,startPosition
     local function place()
         if activeInput then return end
@@ -712,11 +729,13 @@ local function draggable(widget,handle,key)
         widget.Position=UDim2.fromOffset(x,y)
         if key=='menu' then toggle.Position=widget.Position end
     end
-    table.insert(connections,handle.InputBegan:Connect(function(input)
+    for _,surface in ipairs(handles) do
+    table.insert(connections,surface.InputBegan:Connect(function(input)
         if activeInput or not (input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1) then return end
         activeInput=input;startPointer=Vector2.new(input.Position.X,input.Position.Y)
         startPosition=widget.AbsolutePosition-root.AbsolutePosition
     end))
+    end
     table.insert(connections,UserInputService.InputChanged:Connect(function(input)
         if not activeInput then return end
         if input~=activeInput and not (activeInput.UserInputType==Enum.UserInputType.MouseButton1 and input.UserInputType==Enum.UserInputType.MouseMovement) then return end
@@ -785,12 +804,25 @@ local function radarPoint(dx,dz,fx,fz,range,radius)
     local forward=dx*fx+dz*fz
     return right/range*radius,-forward/range*radius
 end
+local function radarDiameter(requested,width,height)
+    return math.max(1,math.min(requested,width-16,height-40))
+end
+local function radarStyle()
+    local size=radarDiameter(prefs.radarSize,root.AbsoluteSize.X,root.AbsoluteSize.Y)
+    radar.Size=UDim2.fromOffset(size,size+24)
+    disc.Size=UDim2.fromOffset(size,size)
+    disc.BackgroundTransparency=prefs.radarTransparency
+end
+radarStyle()
+table.insert(connections,root:GetPropertyChangedSignal('AbsoluteSize'):Connect(radarStyle))
+draggable(radar,{radarTitle,disc},'radar')
 local radarElapsed=1
 local lastForward=Vector3.new(0,0,-1)
 table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     radarElapsed=radarElapsed+dt
     if radarElapsed<0.2 then return end
     radarElapsed=0
+    radarStyle()
     radar.Visible=prefs.radar
     if not prefs.radar then return end
     for _,dot in ipairs(radarDots) do dot.Visible=false end
@@ -814,8 +846,8 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     local count=math.min(24,#nearby)
     for i=1,count do
         local entry=nearby[i]
-        local x,y=radarPoint(entry.delta.X,entry.delta.Z,lastForward.X,lastForward.Z,range,68)
-        radarDots[i].Position=UDim2.fromOffset(75+x,75+y)
+        local x,y=radarPoint(entry.delta.X,entry.delta.Z,lastForward.X,lastForward.Z,range,math.max(1,disc.AbsoluteSize.X/2-7))
+        radarDots[i].Position=UDim2.fromOffset(disc.AbsoluteSize.X/2+x,disc.AbsoluteSize.Y/2+y)
         radarDots[i].Visible=true
     end
     radarTitle.Text=string.format('Радар %d м • %d/%d',prefs.radarMeters,count,#nearby)
