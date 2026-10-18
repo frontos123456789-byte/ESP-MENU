@@ -2,6 +2,7 @@
 -- Execute only once per session; running again replaces the previous instance.
 local Players = game:GetService('Players')
 local RunService = game:GetService('RunService')
+local UserInputService=game:GetService('UserInputService')
 local player = Players.LocalPlayer
 local parent = player:WaitForChild('PlayerGui')
 local previous = parent:FindFirstChild('UAV_ESP_Menu')
@@ -16,7 +17,7 @@ local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, uav = false}
 local HttpService=game:GetService('HttpService')
-local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200}
+local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,positions={menu={x=0,y=0},counter={x=1,y=0}}}
 local settingsFile='uav_esp_settings_'..tostring(game.PlaceId)..'.json'
 local persistenceMessage='Настройки: только текущая сессия'
 local function finite(value,low,high)
@@ -32,6 +33,15 @@ local function restoreSettings(data)
         if finite(data.prefs.dotSize,2,8) then prefs.dotSize=math.floor(data.prefs.dotSize+0.5) end
         if finite(data.prefs.outlineTransparency,0,1) then prefs.outlineTransparency=data.prefs.outlineTransparency end
         if finite(data.prefs.alertMeters,50,1000) then prefs.alertMeters=math.floor(data.prefs.alertMeters) end
+    end
+    if type(data.prefs)=='table' then
+        if finite(data.prefs.radarMeters,100,1000) then prefs.radarMeters=math.floor(data.prefs.radarMeters) end
+        if type(data.prefs.positions)=='table' then
+            for _,key in ipairs({'menu','counter'}) do
+                local pos=data.prefs.positions[key]
+                if type(pos)=='table' and finite(pos.x,0,1) and finite(pos.y,0,1) then prefs.positions[key]={x=pos.x,y=pos.y} end
+            end
+        end
     end
     if finite(data.distance,300,5000) then distance=math.floor(data.distance) end
     if type(data.automatic)=='boolean' then automatic=data.automatic end
@@ -128,13 +138,20 @@ toggle.Visible = false
 toggle.Parent = root
 Instance.new('UICorner',toggle).CornerRadius = UDim.new(0,10)
 local close = Instance.new('TextButton')
-close.Size = UDim2.new(1,-16,0,44)
-close.Position = UDim2.fromOffset(8,4)
-close.Text = 'БПЛА ESP     × Скрыть'
+close.Size = UDim2.fromOffset(74,44)
+close.Position = UDim2.new(1,-78,0,4)
+close.Text = '× Скрыть'
 close.TextSize = 16
 close.TextColor3 = Color3.new(1,1,1)
 close.BackgroundTransparency = 1
 close.Parent = panel
+local dragHeader=Instance.new('TextLabel')
+dragHeader.Size=UDim2.new(1,-86,0,44)
+dragHeader.Position=UDim2.fromOffset(8,4)
+dragHeader.BackgroundTransparency=1
+dragHeader.Text='БПЛА ESP • перетащи'
+dragHeader.TextColor3=Color3.new(1,1,1)
+dragHeader.TextSize=13;dragHeader.Parent=panel
 close.Activated:Connect(function()
     panel.Visible = false
     toggle.Visible = true
@@ -247,6 +264,15 @@ outlineButton.Activated:Connect(function()
 end)
 preferenceToggle('showSpeed','Показывать скорость')
 preferenceToggle('showDistance','Показывать расстояние')
+preferenceToggle('showDirection','Приближается / удаляется')
+preferenceToggle('radar','Мини-радар')
+local radarRangeButton=row('',true)
+local function radarRangeText()radarRangeButton.Text='Радиус радара: '..prefs.radarMeters..' м • +100'end
+radarRangeText()
+radarRangeButton.Activated:Connect(function()
+    prefs.radarMeters=prefs.radarMeters>=1000 and 100 or math.min(1000,prefs.radarMeters+100)
+    radarRangeText();changed()
+end)
 row('Сохранить настройки сейчас',true).Activated:Connect(saveNow)
 settingsStatus=row(persistenceMessage,false,44)
 local status = row('Поиск объектов…', false, 40)
@@ -303,7 +329,7 @@ local function mark(object, part)
     local speed = Instance.new('TextLabel')
     speed.Name = 'ESP_Speed'
     speed.AnchorPoint = Vector2.new(0.5,1)
-    speed.Size = UDim2.fromOffset(100,16)
+    speed.Size = UDim2.fromOffset(190,30)
     speed.BackgroundTransparency = 1
     speed.TextColor3 = Color3.new(1,1,1)
     speed.TextTransparency = 0.15
@@ -374,7 +400,25 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         if delta >= 0.15 or sample.part ~= item.part then
             sample.position, sample.time, sample.part = item.part.Position, now, item.part
         end
-        speedLabels[item.object].Text = sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч'
+        local character=player.Character
+        local viewer=character and (character:FindFirstChild('HumanoidRootPart') or character:FindFirstChild('Head'))
+        local trend='нет замера'
+        if viewer then
+            local currentRange=(item.part.Position-viewer.Position).Magnitude
+            local dtRange=sample.rangeTime and now-sample.rangeTime or 0
+            if sample.viewer==viewer and sample.previousRange and dtRange>0 and dtRange<=2 then
+                local closing=(sample.previousRange-currentRange)/dtRange
+                if math.abs(closing)<2000 then
+                    sample.closing=sample.closing and sample.closing*0.5+closing*0.5 or closing
+                    trend=sample.closing>2 and 'приближается' or (sample.closing < -2 and 'удаляется' or 'дистанция стабильна')
+                else sample.closing=nil end
+            else sample.closing=nil end
+            sample.previousRange,sample.rangeTime,sample.viewer=currentRange,now,viewer
+        end
+        local lines={}
+        if prefs.showSpeed then table.insert(lines,sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч') end
+        if prefs.showDirection then table.insert(lines,trend) end
+        speedLabels[item.object].Text=table.concat(lines,'\n')
         billboard.Adornee = item.part
         billboard.MaxDistance = distance
         billboard.Dot.Size=UDim2.fromOffset(prefs.dotSize,prefs.dotSize)
@@ -408,7 +452,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
             local center, onScreen = camera:WorldToViewportPoint(cf.Position)
             outline.Enabled = onScreen
             outline.OutlineTransparency=prefs.outlineTransparency
-            if onScreen and prefs.showSpeed then
+            if onScreen and (prefs.showSpeed or prefs.showDirection) then
                 local top, inFront = math.huge, true
                 for x=-1,1,2 do
                     for y=-1,1,2 do
@@ -649,4 +693,130 @@ table.insert(connections,RunService.RenderStepped:Connect(function()
             end
         end
     end
+end))
+
+-- Store top-left positions as fractions of usable space; preserve them on rotation.
+local function widgetPoint(pos,width,height,widgetWidth,widgetHeight)
+    local spanX=math.max(0,width-widgetWidth-16)
+    local spanY=math.max(0,height-widgetHeight-16)
+    return math.min(8,math.max(0,width-widgetWidth))+pos.x*spanX,
+        math.min(8,math.max(0,height-widgetHeight))+pos.y*spanY,spanX,spanY
+end
+local function draggable(widget,handle,key)
+    widget.AnchorPoint=Vector2.new(0,0)
+    handle.Active=true
+    local activeInput,startPointer,startPosition
+    local function place()
+        if activeInput then return end
+        local x,y=widgetPoint(prefs.positions[key],root.AbsoluteSize.X,root.AbsoluteSize.Y,widget.AbsoluteSize.X,widget.AbsoluteSize.Y)
+        widget.Position=UDim2.fromOffset(x,y)
+        if key=='menu' then toggle.Position=widget.Position end
+    end
+    table.insert(connections,handle.InputBegan:Connect(function(input)
+        if activeInput or not (input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1) then return end
+        activeInput=input;startPointer=Vector2.new(input.Position.X,input.Position.Y)
+        startPosition=widget.AbsolutePosition-root.AbsolutePosition
+    end))
+    table.insert(connections,UserInputService.InputChanged:Connect(function(input)
+        if not activeInput then return end
+        if input~=activeInput and not (activeInput.UserInputType==Enum.UserInputType.MouseButton1 and input.UserInputType==Enum.UserInputType.MouseMovement) then return end
+        local pointer=Vector2.new(input.Position.X,input.Position.Y)
+        local point=startPosition+pointer-startPointer
+        local x,y,spanX,spanY=widgetPoint({x=0,y=0},root.AbsoluteSize.X,root.AbsoluteSize.Y,widget.AbsoluteSize.X,widget.AbsoluteSize.Y)
+        local px=math.clamp(point.X,x,x+spanX)
+        local py=math.clamp(point.Y,y,y+spanY)
+        prefs.positions[key]={x=spanX>0 and (px-x)/spanX or 0,y=spanY>0 and (py-y)/spanY or 0}
+        widget.Position=UDim2.fromOffset(px,py)
+        if key=='menu' then toggle.Position=widget.Position end
+    end))
+    local function finish()
+        if activeInput then activeInput=nil;changed();place() end
+    end
+    table.insert(connections,UserInputService.InputEnded:Connect(function(input)if input==activeInput then finish() end end))
+    table.insert(connections,UserInputService.WindowFocusReleased:Connect(finish))
+    table.insert(connections,root:GetPropertyChangedSignal('AbsoluteSize'):Connect(function()finish();place()end))
+    table.insert(connections,widget:GetPropertyChangedSignal('AbsoluteSize'):Connect(place))
+    place()
+end
+draggable(panel,dragHeader,'menu')
+draggable(counter,counter,'counter')
+
+local radar=Instance.new('Frame')
+radar.Name='MiniRadar'
+radar.AnchorPoint=Vector2.new(1,0)
+radar.Position=UDim2.new(1,-12,0,58)
+radar.Size=UDim2.fromOffset(150,174)
+radar.BackgroundTransparency=1;radar.Parent=root
+local radarTitle=Instance.new('TextLabel')
+radarTitle.Size=UDim2.new(1,0,0,24)
+radarTitle.BackgroundTransparency=1;radarTitle.TextSize=12
+radarTitle.TextColor3=Color3.new(1,1,1);radarTitle.Parent=radar
+local disc=Instance.new('Frame')
+disc.Position=UDim2.fromOffset(0,24);disc.Size=UDim2.fromOffset(150,150)
+disc.BackgroundColor3=Color3.fromRGB(18,26,35);disc.BackgroundTransparency=0.25
+disc.BorderSizePixel=0;disc.Parent=radar
+Instance.new('UICorner',disc).CornerRadius=UDim.new(1,0)
+local stroke=Instance.new('UIStroke',disc)
+stroke.Color=Color3.fromRGB(110,130,145);stroke.Transparency=0.4;stroke.Thickness=1
+for _,vertical in ipairs({true,false}) do
+    local line=Instance.new('Frame')
+    line.AnchorPoint=Vector2.new(0.5,0.5);line.Position=UDim2.fromScale(0.5,0.5)
+    line.Size=vertical and UDim2.new(0,1,1,-12) or UDim2.new(1,-12,0,1)
+    line.BackgroundColor3=Color3.fromRGB(110,130,145);line.BackgroundTransparency=0.65
+    line.BorderSizePixel=0;line.Parent=disc
+end
+local selfMarker=Instance.new('TextLabel')
+selfMarker.AnchorPoint=Vector2.new(0.5,0.5);selfMarker.Position=UDim2.fromScale(0.5,0.5)
+selfMarker.Size=UDim2.fromOffset(14,16);selfMarker.BackgroundTransparency=1
+selfMarker.Text='▲';selfMarker.TextSize=12;selfMarker.TextColor3=Color3.fromRGB(90,220,255)
+selfMarker.ZIndex=3;selfMarker.Parent=disc
+local radarDots={}
+for i=1,24 do
+    local dot=Instance.new('Frame')
+    dot.AnchorPoint=Vector2.new(0.5,0.5);dot.Size=UDim2.fromOffset(4,4)
+    dot.BackgroundColor3=Color3.new(1,1,1);dot.BorderSizePixel=0;dot.Visible=false
+    dot.ZIndex=2;dot.Parent=disc;Instance.new('UICorner',dot).CornerRadius=UDim.new(1,0)
+    radarDots[i]=dot
+end
+local function radarPoint(dx,dz,fx,fz,range,radius)
+    local length=math.sqrt(fx*fx+fz*fz)
+    if length<0.001 then fx,fz=0,-1 else fx,fz=fx/length,fz/length end
+    local right=dx*(-fz)+dz*fx
+    local forward=dx*fx+dz*fz
+    return right/range*radius,-forward/range*radius
+end
+local radarElapsed=1
+local lastForward=Vector3.new(0,0,-1)
+table.insert(connections,RunService.Heartbeat:Connect(function(dt)
+    radarElapsed=radarElapsed+dt
+    if radarElapsed<0.2 then return end
+    radarElapsed=0
+    radar.Visible=prefs.radar
+    if not prefs.radar then return end
+    for _,dot in ipairs(radarDots) do dot.Visible=false end
+    local camera=workspace.CurrentCamera
+    local character=player.Character
+    local originPart=character and (character:FindFirstChild('HumanoidRootPart') or character:FindFirstChild('Head'))
+    if not camera or not originPart then radarTitle.Text='Радар • нет персонажа';return end
+    local forward=camera.CFrame.LookVector
+    if forward.X*forward.X+forward.Z*forward.Z>0.0001 then lastForward=forward end
+    local range=prefs.radarMeters/METERS_PER_STUD
+    local nearby={}
+    for _,object in ipairs(roster) do
+        local part=targetPart(object)
+        if part then
+            local delta=part.Position-originPart.Position
+            local horizontal=math.sqrt(delta.X*delta.X+delta.Z*delta.Z)
+            if horizontal<=range then table.insert(nearby,{delta=delta,distance=horizontal}) end
+        end
+    end
+    table.sort(nearby,function(a,b)return a.distance<b.distance end)
+    local count=math.min(24,#nearby)
+    for i=1,count do
+        local entry=nearby[i]
+        local x,y=radarPoint(entry.delta.X,entry.delta.Z,lastForward.X,lastForward.Z,range,68)
+        radarDots[i].Position=UDim2.fromOffset(75+x,75+y)
+        radarDots[i].Visible=true
+    end
+    radarTitle.Text=string.format('Радар %d м • %d/%d',prefs.radarMeters,count,#nearby)
 end))
