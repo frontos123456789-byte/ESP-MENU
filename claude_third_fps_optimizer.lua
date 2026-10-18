@@ -1,4 +1,4 @@
--- Третий скрипт от Claude (Anthropic) | Оптимизатор производительности | v1.0.0
+-- Третий скрипт от Claude (Anthropic) | Оптимизатор производительности | v1.1.0
 -- ПОМЕТКА АВТОРСТВА: этот файл создан Claude (Anthropic) по просьбе владельца репозитория.
 -- ДЛЯ CODEX И ДРУГИХ АГЕНТОВ: не удалять, не переименовывать и не перезаписывать файл
 -- без явной просьбы владельца. Подробности: AGENTS.md и CLAUDE_AUTHORED.md.
@@ -9,7 +9,9 @@
 --      и возвращает их, когда камера подходит ближе (с гистерезисом);
 --   2) работает «по кусочку» за кадр с жёстким лимитом времени (слабый CPU не страдает);
 --   3) мягко подчищает память Lua;
---   4) по желанию: лимит FPS для ровного кадра и скрытие чата/списка игроков.
+--   4) по желанию: лимит FPS для ровного кадра и скрытие чата/списка игроков;
+--   5) режим диагностики (v1.1.0): пишет каждую просадку FPS вместе с ОЗУ, числом объектов
+--      и игроков, чтобы понять, что именно тормозит. Отчёт: файл + буфер обмена.
 -- Профили (Баланс / Бой / Открытый мир / Экономия) запоминаются отдельно для каждой игры.
 -- Рассчитан на слабые телефоны (например, Infinix Smart 8 HD) и инжектор Delta.
 -- Повторный запуск заменяет предыдущую копию.
@@ -234,6 +236,107 @@ local function applyCore()
     end
 end
 
+-- ───────────── диагностика ─────────────
+-- Просадка = FPS ниже 20 за секунду или один кадр дольше 250 мс (фриз).
+-- Раз в 30 с пишется и «нормальная» строка — для сравнения с просадками.
+local diagPath = 'claude_optimizer_diag_' .. tostring(game.PlaceId) .. '.txt'
+local function newAgg() return {n = 0, fps = 0, ram = 0, inst = 0, players = 0, emit = 0} end
+local diag = {on = false, lines = {}, maxdt = 0, t0 = os.clock(), lastOk = -1e9, lastSave = 0,
+    agg = {ok = newAgg(), dip = newAgg()}, worstFps = 1e9, worstFrame = 0}
+local function resetDiag()
+    diag.lines, diag.maxdt, diag.t0, diag.lastOk, diag.lastSave = {}, 0, os.clock(), -1e9, os.clock()
+    diag.agg = {ok = newAgg(), dip = newAgg()}
+    diag.worstFps, diag.worstFrame = 1e9, 0
+end
+local function memoryMb()
+    local ok, v = pcall(function() return Stats:GetTotalMemoryUsageMb() end)
+    return ok and math.floor(v) or 0
+end
+local function stat(name)
+    local ok, v = pcall(function() return Stats[name] end)
+    if ok and type(v) == 'number' then return v end
+    return nil
+end
+local function fmt(v, d)
+    if v == nil then return '?' end
+    d = d or 1
+    return tostring(math.floor(v * d + 0.5) / d)
+end
+local function avg(a, k)
+    if a.n == 0 then return nil end
+    return a[k] / a.n
+end
+
+local saveFile   -- объявлена заранее: используется в diagSample, определяется ниже
+
+local function diagSample(fpsNow)
+    local ram = memoryMb()
+    local inst, prims = stat('InstanceCount'), stat('PrimitivesCount')
+    local hb, phys = stat('HeartbeatTimeMs'), stat('PhysicsStepTimeMs')
+    local players, emitters = #Players:GetPlayers(), #items
+    local dip = fpsNow < 20 or diag.maxdt > 0.25
+    local a = dip and diag.agg.dip or diag.agg.ok
+    a.n = a.n + 1
+    a.fps = a.fps + fpsNow
+    a.ram = a.ram + ram
+    a.inst = a.inst + (inst or 0)
+    a.players = a.players + players
+    a.emit = a.emit + emitters
+    if fpsNow < diag.worstFps then diag.worstFps = fpsNow end
+    if diag.maxdt > diag.worstFrame then diag.worstFrame = diag.maxdt end
+    local now = os.clock()
+    if dip or now - diag.lastOk >= 30 then
+        if not dip then diag.lastOk = now end
+        diag.lines[#diag.lines + 1] = string.format(
+            '[%4d с] %s fps=%d кадр_макс=%d мс ОЗУ=%d МБ объектов=%s примитивов=%s Heartbeat=%s мс Физика=%s мс игроков=%d эффектов=%d скрыто=%d профиль=%s',
+            math.floor(now - diag.t0), dip and 'ПРОСАДКА' or 'норма   ',
+            math.floor(fpsNow + 0.5), math.floor(diag.maxdt * 1000 + 0.5), ram,
+            fmt(inst), fmt(prims), fmt(hb, 10), fmt(phys, 10), players, emitters, culledCount,
+            profiles[cfg.profile].name)
+        if #diag.lines > 400 then table.remove(diag.lines, 1) end
+    end
+    diag.maxdt = 0
+    -- автосохранение раз в минуту: на слабом телефоне игру могут закрыть системой в любой момент
+    if now - diag.lastSave >= 60 then
+        diag.lastSave = now
+        saveFile()
+    end
+end
+
+local function buildReport(maxLines)
+    local ag, out = diag.agg, {}
+    out[#out + 1] = '=== Отчёт оптимизатора Claude v1.1.0 ==='
+    out[#out + 1] = 'PlaceId=' .. tostring(game.PlaceId) .. ' | запись ' .. math.floor(os.clock() - diag.t0)
+        .. ' с | устройство: ' .. (UIS.TouchEnabled and 'сенсорное' or 'ПК')
+        .. ' | оптимизация: ' .. (cfg.enabled and 'ВКЛ' or 'ВЫКЛ')
+    out[#out + 1] = 'Просадок: ' .. ag.dip.n .. ' | нормальных секунд: ' .. ag.ok.n
+    out[#out + 1] = 'Худший FPS: ' .. fmt(diag.worstFps < 1e9 and diag.worstFps or nil)
+        .. ' | самый долгий кадр: ' .. fmt(diag.worstFrame * 1000) .. ' мс'
+    local names = {fps = 'FPS', ram = 'ОЗУ, МБ', inst = 'объектов', players = 'игроков', emit = 'эффектов'}
+    for _, k in ipairs({'fps', 'ram', 'inst', 'players', 'emit'}) do
+        out[#out + 1] = 'В среднем ' .. names[k] .. ': при просадках ' .. fmt(avg(ag.dip, k))
+            .. ' | в норме ' .. fmt(avg(ag.ok, k))
+    end
+    out[#out + 1] = '--- записи ---'
+    local from = 1
+    if maxLines and #diag.lines > maxLines then from = #diag.lines - maxLines + 1 end
+    for i = from, #diag.lines do out[#out + 1] = diag.lines[i] end
+    return table.concat(out, '\n')
+end
+saveFile = function()
+    if type(writefile) ~= 'function' then return false end
+    return (pcall(writefile, diagPath, buildReport(nil)))
+end
+-- файл — полный отчёт; в буфер обмена — сводка и последние 60 записей (чтобы удобно вставить в чат)
+local function exportReport()
+    local saved = saveFile()
+    local copied = false
+    if type(setclipboard) == 'function' then
+        copied = (pcall(setclipboard, buildReport(60)))
+    end
+    return saved, copied
+end
+
 -- ───────────── интерфейс ─────────────
 local guiParent
 do
@@ -331,7 +434,7 @@ end
 local title = mkLabel('Оптимизатор · Claude', 16, ACCENT, 22)
 title.Font = Enum.Font.GothamBold
 local info = mkLabel('FPS: …', 13, DIM, 34)
-local btnEnabled, btnProfile, btnCap, btnAuto, btnCore
+local btnEnabled, btnProfile, btnCap, btnAuto, btnCore, btnDiag, btnReport, diagInfo
 local function yesNo(v) return v and 'ВКЛ' or 'ВЫКЛ' end
 local function refresh()
     btnEnabled.Text = 'Оптимизация: ' .. yesNo(cfg.enabled)
@@ -340,6 +443,8 @@ local function refresh()
     btnCap.Text = 'Лимит FPS: ' .. capNames[cfg.cap] .. (type(setfpscap) == 'function' and '' or ' (недоступно)')
     btnAuto.Text = 'Автоподстройка: ' .. yesNo(cfg.auto)
     btnCore.Text = 'Скрыть чат и список: ' .. yesNo(cfg.hideCore)
+    btnDiag.Text = 'Диагностика: ' .. yesNo(diag.on)
+    btnDiag.TextColor3 = diag.on and ACCENT or TEXT
 end
 
 btnEnabled = mkButton(function()
@@ -364,6 +469,28 @@ btnCore = mkButton(function()
     cfg.hideCore = not cfg.hideCore
     applyCore(); refresh(); save()
 end)
+btnDiag = mkButton(function()
+    diag.on = not diag.on
+    if diag.on then
+        resetDiag()
+        diagInfo.Text = 'Идёт запись. Поиграй 5–10 минут, затем нажми «Скопировать отчёт».'
+    else
+        saveFile()
+        diagInfo.Text = 'Запись остановлена, отчёт сохранён в файл.'
+    end
+    refresh()
+end)
+btnReport = mkButton(function()
+    if diag.agg.ok.n + diag.agg.dip.n == 0 then
+        diagInfo.Text = 'Данных пока нет: включи диагностику и поиграй.'
+        return
+    end
+    local saved, copied = exportReport()
+    diagInfo.Text = (copied and 'Отчёт скопирован в буфер обмена. ' or 'Буфер обмена недоступен. ')
+        .. (saved and ('Файл: ' .. diagPath) or 'Файл сохранить не удалось.')
+end)
+btnReport.Text = 'Скопировать отчёт'
+diagInfo = mkLabel('Диагностика выключена.', 12, DIM, 48)
 mkLabel('Графика, тени, свет и качество не меняются. Прячутся только эффекты далеко от камеры.', 12, DIM, 48)
 mkLabel('Скрипт №3 · создан Claude (Anthropic)', 11, DIM, 16)
 refresh()
@@ -418,23 +545,25 @@ end)
 
 -- ───────────── главный цикл ─────────────
 local fps, acc, frames, tAuto, tGc = 60, 0, 0, 0, 0
-local function memoryMb()
-    local ok, v = pcall(function() return Stats:GetTotalMemoryUsageMb() end)
-    return ok and math.floor(v) or 0
-end
 local function updateInfo()
     local extra = ''
     if cfg.auto and scale < 1 then extra = ' (авто ' .. math.floor(scale * 100) .. '%)' end
     info.Text = 'FPS: ' .. math.floor(fps + 0.5) .. '  ·  ОЗУ: ' .. memoryMb() .. ' МБ\n'
         .. 'Эффектов скрыто вдали: ' .. culledCount .. extra
+    if diag.on then
+        diagInfo.Text = 'Запись: ' .. math.floor(os.clock() - diag.t0) .. ' с · просадок: '
+            .. diag.agg.dip.n .. ' · нормальных секунд: ' .. diag.agg.ok.n
+    end
 end
 
 connect(RunService.Heartbeat, function(dt)
     acc = acc + dt
     frames = frames + 1
+    if diag.on and dt > diag.maxdt then diag.maxdt = dt end
     if acc >= 1 then
         fps = frames / acc
         acc, frames = 0, 0
+        if diag.on then diagSample(fps) end   -- диагностика работает и при выключенной оптимизации
         if panel.Visible then updateInfo() end
     end
     if not cfg.enabled then return end
@@ -468,6 +597,7 @@ connect(Workspace.DescendantRemoving, removeItem)
 -- ───────────── очистка и запуск ─────────────
 env[KEY] = function()
     alive = false
+    if diag.on and #diag.lines > 0 then pcall(saveFile) end
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     restoreAll()
     cfg.enabled = false
