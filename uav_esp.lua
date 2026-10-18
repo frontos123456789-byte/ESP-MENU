@@ -15,6 +15,56 @@ gui.Parent = parent
 local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, uav = false}
+local HttpService=game:GetService('HttpService')
+local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200}
+local settingsFile='uav_esp_settings_'..tostring(game.PlaceId)..'.json'
+local persistenceMessage='Настройки: только текущая сессия'
+local function finite(value,low,high)
+    return type(value)=='number' and value==value and value>=low and value<=high
+end
+local function restoreSettings(data)
+    if type(data)~='table' or data.version~=1 then return false end
+    if type(data.prefs)=='table' then
+        for key in pairs(prefs) do
+            local value=data.prefs[key]
+            if type(prefs[key])=='boolean' and type(value)=='boolean' then prefs[key]=value end
+        end
+        if finite(data.prefs.dotSize,2,8) then prefs.dotSize=math.floor(data.prefs.dotSize+0.5) end
+        if finite(data.prefs.outlineTransparency,0,1) then prefs.outlineTransparency=data.prefs.outlineTransparency end
+        if finite(data.prefs.alertMeters,50,1000) then prefs.alertMeters=math.floor(data.prefs.alertMeters) end
+    end
+    if finite(data.distance,300,5000) then distance=math.floor(data.distance) end
+    if type(data.automatic)=='boolean' then automatic=data.automatic end
+    if type(data.enabled)=='table' then
+        for key in pairs(enabled) do if type(data.enabled[key])=='boolean' then enabled[key]=data.enabled[key] end end
+    end
+    return true
+end
+if type(readfile)=='function' then
+    local ok,data=pcall(function()return HttpService:JSONDecode(readfile(settingsFile))end)
+    if ok and restoreSettings(data) then persistenceMessage='Сохранённые настройки загружены' end
+end
+local settingsStatus
+local saveQueued=false
+local function saveNow()
+    if type(writefile)~='function' then persistenceMessage='Запись недоступна: настройки на эту сессию'
+    else
+        local ok=pcall(function()
+            writefile(settingsFile,HttpService:JSONEncode({version=1,prefs=prefs,enabled=enabled,distance=distance,automatic=automatic}))
+        end)
+        persistenceMessage=ok and 'Настройки сохранены на устройстве' or 'Не удалось сохранить настройки'
+    end
+    if settingsStatus and settingsStatus.Parent then settingsStatus.Text=persistenceMessage end
+end
+local function changed()
+    if saveQueued then return end
+    saveQueued=true
+    task.delay(1,function()
+        saveQueued=false
+        if alive then saveNow() end
+    end)
+end
+
 local candidates, marks, connections = {}, {}, {}
 local outlines, speedLabels, motion = {}, {}, {}
 local METERS_PER_STUD = 0.28
@@ -48,6 +98,7 @@ local function clearMark(object)
 end
 local function cleanup()
     if not alive then return end
+    if saveQueued then saveNow() end
     alive = false
     for _, connection in ipairs(connections) do connection:Disconnect() end
     for object in pairs(marks) do clearMark(object) end
@@ -131,9 +182,10 @@ local function row(text, button, height)
 end
 -- Header remains accessible while the settings scroll.
 for _, kind in ipairs({'drone', 'missile', 'uav'}) do
-    local button = row(names[kind] .. ': ВЫКЛ', true)
+    local button = row((kind == 'uav' and 'Все БПЛА' or names[kind]) .. ': ' .. (enabled[kind] and 'ВКЛ' or 'ВЫКЛ'), true)
     button.Activated:Connect(function()
         enabled[kind] = not enabled[kind]
+        changed()
         button.Text = (kind == 'uav' and 'Все БПЛА' or names[kind]) .. ': ' .. (enabled[kind] and 'ВКЛ' or 'ВЫКЛ')
     end)
 end
@@ -142,11 +194,12 @@ rangeButton.Activated:Connect(function()
     if calibrating then return end
     automatic = false
     distance = distance >= 5000 and 500 or math.min(5000, distance + 500)
+    changed()
 end)
 local autoButton = row('Автоподбор дальности', true)
 autoButton.Activated:Connect(function()
     if calibrating then return end
-    if automatic then automatic = false; return end
+    if automatic then automatic = false; changed(); return end
     calibrating = true
     autoButton.Text = 'Замер FPS: 8 секунд…'
     task.spawn(function()
@@ -163,8 +216,39 @@ autoButton.Activated:Connect(function()
         -- Automatic graphics reports 0; do not infer actual GPU quality from it.
         if quality > 0 and quality <= 3 then distance = math.min(distance, 2000) end
         automatic, calibrating = true, false
+        changed()
     end)
 end)
+local function preferenceToggle(key,title)
+    local button=row('',true)
+    local function refresh()button.Text=title..': '..(prefs[key] and 'ВКЛ' or 'ВЫКЛ')end
+    refresh()
+    button.Activated:Connect(function()prefs[key]=not prefs[key];refresh();changed()end)
+end
+preferenceToggle('alerts','Предупреждение о приближении')
+local alertRange=row('',true)
+local function alertRangeText()alertRange.Text='Порог тревоги: '..prefs.alertMeters..' м • +50'end
+alertRangeText()
+alertRange.Activated:Connect(function()
+    prefs.alertMeters=prefs.alertMeters>=1000 and 50 or math.min(1000,prefs.alertMeters+50)
+    alertRangeText();changed()
+end)
+preferenceToggle('arrows','Стрелки вне экрана • 4 ближайших')
+local dotButton=row('',true)
+local function dotText()dotButton.Text='Размер точки: '..prefs.dotSize..' px'end
+dotText()
+dotButton.Activated:Connect(function()prefs.dotSize=prefs.dotSize>=8 and 2 or prefs.dotSize+1;dotText();changed()end)
+local outlineButton=row('',true)
+local function outlineText()outlineButton.Text='Прозрачность обводки: '..math.floor(prefs.outlineTransparency*100+0.5)..'%'end
+outlineText()
+outlineButton.Activated:Connect(function()
+    prefs.outlineTransparency=prefs.outlineTransparency>=0.99 and 0 or math.min(1,math.floor(prefs.outlineTransparency*10+1.5)/10)
+    outlineText();changed()
+end)
+preferenceToggle('showSpeed','Показывать скорость')
+preferenceToggle('showDistance','Показывать расстояние')
+row('Сохранить настройки сейчас',true).Activated:Connect(saveNow)
+settingsStatus=row(persistenceMessage,false,44)
 local status = row('Поиск объектов…', false, 40)
 row('Выключить и удалить ESP', true).Activated:Connect(function() gui:Destroy() end)
 
@@ -191,7 +275,7 @@ local function mark(object, part)
     dot.Name = 'Dot'
     dot.AnchorPoint = Vector2.new(0.5,0.5)
     dot.Position = UDim2.fromScale(0.5,0.5)
-    dot.Size = UDim2.fromOffset(4,4)
+    dot.Size = UDim2.fromOffset(prefs.dotSize,prefs.dotSize)
     dot.BorderSizePixel = 0
     dot.BackgroundTransparency = 0.15
     dot.Parent = billboard
@@ -212,7 +296,7 @@ local function mark(object, part)
     outline.Adornee = object
     outline.FillTransparency = 1
     outline.OutlineColor = Color3.new(1,1,1)
-    outline.OutlineTransparency = 0.2
+    outline.OutlineTransparency = prefs.outlineTransparency
     outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     outline.Parent = object
     outlines[object] = outline
@@ -293,6 +377,9 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         speedLabels[item.object].Text = sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч'
         billboard.Adornee = item.part
         billboard.MaxDistance = distance
+        billboard.Dot.Size=UDim2.fromOffset(prefs.dotSize,prefs.dotSize)
+        billboard.Distance.Visible=prefs.showDistance
+        outlines[item.object].OutlineTransparency=prefs.outlineTransparency
         local _, onScreen = camera:WorldToViewportPoint(item.part.Position)
         billboard.Enabled = onScreen
         if onScreen then
@@ -320,7 +407,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
             else cf, size = object.CFrame, object.Size end
             local center, onScreen = camera:WorldToViewportPoint(cf.Position)
             outline.Enabled = onScreen
-            if onScreen then
+            outline.OutlineTransparency=prefs.outlineTransparency
+            if onScreen and prefs.showSpeed then
                 local top, inFront = math.huge, true
                 for x=-1,1,2 do
                     for y=-1,1,2 do
@@ -447,4 +535,118 @@ local rosterTime=1
 table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     rosterTime=rosterTime+dt
     if rosterTime>=0.5 then rosterTime=0;rebuildRoster() end
+end))
+
+-- Approach alerts are based on target motion and closing distance, not camera motion.
+local warning=Instance.new('TextLabel')
+warning.AnchorPoint=Vector2.new(0.5,1)
+warning.Position=UDim2.new(0.5,0,1,-12)
+warning.Size=UDim2.new(1,-24,0,44)
+warning.BackgroundColor3=Color3.fromRGB(105,35,30)
+warning.BackgroundTransparency=0.12
+warning.TextColor3=Color3.new(1,1,1)
+warning.TextSize=15;warning.TextWrapped=true;warning.Visible=false;warning.Parent=root
+Instance.new('UICorner',warning).CornerRadius=UDim.new(0,8)
+local arrowSlots={}
+for i=1,4 do
+    local frame=Instance.new('Frame')
+    frame.AnchorPoint=Vector2.new(0.5,0.5);frame.Size=UDim2.fromOffset(64,40)
+    frame.BackgroundTransparency=1;frame.Visible=false;frame.Parent=root
+    local arrow=Instance.new('TextLabel')
+    arrow.AnchorPoint=Vector2.new(0.5,0.5);arrow.Position=UDim2.fromScale(0.5,0.3)
+    arrow.Size=UDim2.fromOffset(24,24);arrow.BackgroundTransparency=1
+    arrow.Text='▲';arrow.TextSize=19;arrow.TextColor3=Color3.fromRGB(255,220,100)
+    arrow.TextStrokeTransparency=0.5;arrow.Parent=frame
+    local label=Instance.new('TextLabel')
+    label.Position=UDim2.new(0,0,0,26);label.Size=UDim2.new(1,0,0,12)
+    label.BackgroundTransparency=1;label.TextSize=10;label.TextColor3=Color3.new(1,1,1)
+    label.TextStrokeTransparency=0.5;label.Parent=frame
+    arrowSlots[i]={frame=frame,arrow=arrow,label=label}
+end
+local function approaching(previous,position,range,dt,origin)
+    if not previous or dt<=0 or dt>2 or range<0.001 then return false end
+    local velocity=(position-previous.position)/dt
+    if velocity.Magnitude>2000 then return false end -- discontinuity/teleport
+    local radial=velocity:Dot((origin-position).Unit)
+    local closing=(previous.range-range)/dt
+    return radial>2 and closing>2
+end
+local function edgePoint(dx,dy,width,height)
+    if math.abs(dx)+math.abs(dy)<0.001 then dx,dy=0,1 end -- directly behind
+    local halfWidth=math.max(1,width/2-36)
+    local halfHeight=math.max(1,height/2-54)
+    local factor=1/math.max(math.abs(dx)/halfWidth,math.abs(dy)/halfHeight)
+    return width/2+dx*factor,height/2+dy*factor,math.deg(math.atan2(dy,dx))+90
+end
+local approachSamples={}
+local previousCharacter
+local extraElapsed=0
+local warningUntil,lastWarning=0,-math.huge
+local offscreenTargets={}
+table.insert(connections,RunService.Heartbeat:Connect(function(dt)
+    extraElapsed=extraElapsed+dt
+    if extraElapsed<0.25 then return end
+    extraElapsed=0
+    local camera=workspace.CurrentCamera
+    local character=player.Character
+    local head=character and (character:FindFirstChild('HumanoidRootPart') or character:FindFirstChild('Head'))
+    local humanoid=character and character:FindFirstChildOfClass('Humanoid')
+    if character~=previousCharacter then
+        approachSamples={};previousCharacter=character;warningUntil=0
+    end
+    if not camera or not head or (humanoid and humanoid.Health<=0) then
+        offscreenTargets={};approachSamples={};warning.Visible=false;return
+    end
+    local now=os.clock()
+    local found,keep={},{}
+    local nearestAlert,nearestRange
+    for _,object in ipairs(roster) do
+        local part=targetPart(object)
+        if part then
+            local position=part.Position
+            local range=(position-head.Position).Magnitude
+            local previous=approachSamples[object]
+            local sampleDt=previous and now-previous.time or 0
+            local threshold=prefs.alertMeters/METERS_PER_STUD
+            local alerted=previous and previous.alerted or false
+            if range>threshold*1.2 then alerted=false end
+            if prefs.alerts and range<=threshold and not alerted and approaching(previous,position,range,sampleDt,head.Position) then
+                if not nearestRange or range<nearestRange then nearestAlert,nearestRange=object,range end
+            end
+            keep[object]={position=position,range=range,time=now,alerted=alerted}
+            if prefs.arrows and range<=distance then
+                local _,onScreen=camera:WorldToViewportPoint(position)
+                if not onScreen then table.insert(found,{object=object,part=part,range=range}) end
+            end
+        end
+    end
+    approachSamples=keep
+    if nearestAlert and now-lastWarning>=4 then
+        approachSamples[nearestAlert].alerted=true
+        lastWarning=now;warningUntil=now+3
+        warning.Text=string.format('БПЛА приближается • %d м',math.floor(nearestRange*METERS_PER_STUD+0.5))
+    end
+    warning.Visible=prefs.alerts and now<warningUntil
+    table.sort(found,function(a,b)return a.range<b.range end)
+    offscreenTargets={}
+    for i=1,math.min(4,#found) do offscreenTargets[i]=found[i] end
+end))
+table.insert(connections,RunService.RenderStepped:Connect(function()
+    local camera=workspace.CurrentCamera
+    for i,slot in ipairs(arrowSlots) do
+        slot.frame.Visible=false
+        local target=offscreenTargets[i]
+        if prefs.arrows and camera and target and target.part:IsDescendantOf(workspace) then
+            local _,onScreen=camera:WorldToViewportPoint(target.part.Position)
+            if not onScreen then
+                local localPosition=camera.CFrame:PointToObjectSpace(target.part.Position)
+                local x,y,rotation=edgePoint(localPosition.X,-localPosition.Y,root.AbsoluteSize.X,root.AbsoluteSize.Y)
+                slot.frame.Position=UDim2.fromOffset(x,y)
+                slot.arrow.Rotation=rotation
+                slot.label.Visible=prefs.showDistance
+                slot.label.Text=string.format('%d м',math.floor(target.range*METERS_PER_STUD+0.5))
+                slot.frame.Visible=true
+            end
+        end
+    end
 end))
