@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { combinedFingerprint, privacyReport } from "../lib/privacy";
-import { normalizeIP, isPublicIP } from "../lib/ip";
+import { normalizeIP, isPublicIP, clientIP } from "../lib/ip";
+import { allow } from "../lib/ratelimit";
 import type { Field, Section, Whoami } from "../lib/types";
 const f = (
   key: string,
@@ -171,4 +172,52 @@ test("malformed addresses cannot become public identities", () => {
 test("documentation ranges are excluded without excluding adjacent public networks", () => {
   for (const ip of ["192.0.2.1", "198.51.100.1", "203.0.113.1"]) assert.equal(isPublicIP(ip), false);
   for (const ip of ["192.0.3.1", "192.2.1.1", "198.51.101.1"]) assert.equal(isPublicIP(ip), true);
+});
+
+test("WebRTC address is compared with every known address of the same family (dual-stack)", () => {
+  const base = (iceIP: string) => [
+    section([
+      f("http", http("2606:4700:4700::1111")),
+      f("ipv4", "8.8.8.8"),
+      f("ipv6", "2606:4700:4700::1111"),
+      f("ice", { publicIPs: [iceIP], completed: true }),
+    ]),
+  ];
+  assert.equal(level(base("1.1.1.1"), "webrtc"), "red");
+  assert.equal(level(base("8.8.8.8"), "webrtc"), "green");
+});
+test("hosting / VPN organisation names produce a heuristic warning, ordinary ISPs stay unknown", () => {
+  const withOrg = (isp: string) => {
+    const identity = http("8.8.8.8");
+    identity.enrichment = { connection: { isp, org: isp } };
+    return [section([f("http", identity)])];
+  };
+  assert.equal(level(withOrg("M247 Europe SRL"), "vpn"), "yellow");
+  assert.equal(level(withOrg("Hetzner Online GmbH"), "vpn"), "yellow");
+  assert.equal(level(withOrg("Rostelecom"), "vpn"), "unknown");
+});
+test("region is taken from any preferred language, not only the first tag", () => {
+  const identity = http("8.8.8.8");
+  identity.geo = { country: "GB" };
+  assert.equal(
+    level(
+      [section([f("http", identity), f("language", "en"), f("languages", ["en", "en-GB"])])],
+      "language",
+    ),
+    "green",
+  );
+});
+test("client IP prefers platform headers and strips ports / brackets", () => {
+  const h = (o: Record<string, string>) => (n: string) => o[n];
+  assert.equal(clientIP(h({ "x-forwarded-for": "1.2.3.4, 5.6.7.8" })), "1.2.3.4");
+  assert.equal(clientIP(h({ "x-real-ip": "9.9.9.9", "x-forwarded-for": "1.2.3.4" })), "9.9.9.9");
+  assert.equal(clientIP(h({ "x-forwarded-for": "1.2.3.4:5555" })), "1.2.3.4");
+  assert.equal(clientIP(h({ "x-forwarded-for": "[2606:4700::1111]:443" })), "2606:4700::1111");
+  assert.equal(clientIP(h({})), "");
+});
+test("rate limiter allows the limit, blocks the excess and resets after the window", () => {
+  const t = 1_000_000;
+  for (let i = 0; i < 3; i++) assert.equal(allow("k", 3, 1000, t), true);
+  assert.equal(allow("k", 3, 1000, t), false);
+  assert.equal(allow("k", 3, 1000, t + 1001), true);
 });

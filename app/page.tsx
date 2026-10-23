@@ -269,6 +269,7 @@ export default function Home() {
     };
   }, [scan]);
   const report = useMemo(() => privacyReport(sections), [sections]);
+  const score = scanning ? null : report.score;
   const http = getValue<Whoami>(sections, "http");
   const geo = http?.geo;
   const enrichment = http?.enrichment;
@@ -438,11 +439,11 @@ export default function Home() {
         <div className="sidebar-bottom">
           <div className="local-badge">
             <span className="live-dot" />
-            LOCAL-FIRST INSPECTION
+            NO SERVER STORAGE
           </div>
           <p>
-            Ваши данные остаются
-            <br />в этой вкладке.
+            Отчёт не сохраняется
+            <br />и живёт только в этой вкладке.
           </p>
           <button onClick={() => setShowAbout(!showAbout)}>
             <Info size={14} />
@@ -452,7 +453,7 @@ export default function Home() {
           <div className="sidebar-version">
             NO ACCOUNTS. NO ANALYTICS.
             <br />
-            v1.0 / open inspection
+            v1.1 / self-check
           </div>
         </div>
       </aside>
@@ -467,7 +468,7 @@ export default function Home() {
               Без регистрации
             </span>
             <a
-              href="https://github.com/topics/browser-fingerprinting"
+              href="https://coveryourtracks.eff.org/learn"
               target="_blank"
               rel="noreferrer"
               className="learn-link"
@@ -597,12 +598,12 @@ export default function Home() {
                   className="score-ring"
                   style={
                     {
-                      "--score": `${(report.score ?? 0) * 3.6}deg`,
+                      "--score": `${(score ?? 0) * 3.6}deg`,
                     } as React.CSSProperties
                   }
                 >
                   <div>
-                    <strong>{report.score ?? "—"}</strong>
+                    <strong>{score ?? "—"}</strong>
                     <span>/ 100</span>
                   </div>
                 </div>
@@ -610,7 +611,7 @@ export default function Home() {
                   <span className="amber-chip">
                     {scanning
                       ? "Собираем картину"
-                      : report.score !== null && report.score >= 85
+                      : score !== null && score >= 85
                         ? "Меньше видимых сигналов"
                         : "Есть что проверить"}
                   </span>

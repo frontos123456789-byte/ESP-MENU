@@ -41,3 +41,19 @@ export function isPublicIP(ip: string) {
     (a === 203 && b === 0 && p[2] === 113)
   );
 }
+
+function cleanIP(raw: string | null | undefined) {
+  let v = (raw || "").split(",")[0].trim();
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(v);
+  if (bracketed) v = bracketed[1];
+  else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(v)) v = v.slice(0, v.lastIndexOf(":"));
+  return v;
+}
+/** Client IP as set by the Vercel edge; header order prefers values the platform controls. */
+export function clientIP(get: (name: string) => string | null | undefined) {
+  for (const name of ["x-vercel-forwarded-for", "x-real-ip", "x-forwarded-for"]) {
+    const v = cleanIP(get(name));
+    if (v) return v;
+  }
+  return "";
+}

@@ -94,9 +94,9 @@ export const network: Collector = async (signal) => {
           `header.${key}`,
           key,
           v,
-          key.includes("cookie") ||
-            key.includes("authorization") ||
-            key.includes("ip")
+          /^(cookie|authorization|x-real-ip|x-forwarded-for|x-vercel-forwarded-for|x-vercel-ip-.+)$/.test(
+            key,
+          )
             ? "high"
             : "medium",
           "Входящий HTTP-заголовок, доступный приложению после прокси Vercel. Экспорт может содержать чувствительные значения.",

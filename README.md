@@ -34,7 +34,7 @@ npm test
 ## Структура
 
 - `app/page.tsx` — прогрессивный single-page UI, поиск, экспорт, повторный скан.
-- `app/api/whoami/route.ts` — IP из `x-forwarded-for` / `x-real-ip`, Geo Vercel, все доступные приложению HTTP-заголовки, IP-обогащение.
+- `app/api/whoami/route.ts` — IP из `x-vercel-forwarded-for` / `x-real-ip` / `x-forwarded-for` (с очисткой порта), служебные подписи Vercel скрываются, Geo Vercel, все доступные приложению HTTP-заголовки, IP-обогащение.
 - `app/api/network/route.ts` — небольшие запросы задержки, download до 2 MiB, upload до 512 KiB, без хранения тела запроса.
 - `app/api/dns/route.ts` — необязательный прокси к авторитетному DNS-сервису; токен остаётся на сервере.
 - `collectors/*.ts` — независимые сборщики с обработкой ошибок, таймаутами и статусами.
@@ -55,7 +55,7 @@ npm test
 
 **Device:** батарея, storage estimate/persisted, enumerateDevices, статусы известных permissions, наличие интерфейсов сенсоров, gamepads, Bluetooth/USB/Serial/HID, keyboard layout, H.264/VP9/AV1/HEVC/AAC decoding capabilities.
 
-**Behavior:** локальный bait для косметических adblock-фильтров, Brave self-identification, артефакты автоматизации и защиты от fingerprinting. Никакого запроса камеры, микрофона, геолокации, локальных шрифтов, USB/Bluetooth или активации сенсоров. Permissions API только читает статус. Permissions-Policy страницы дополнительно запрещает камеру, микрофон, геолокацию и сенсоры, поэтому `denied` может отражать эту политику, а не решение пользователя.
+**Behavior:** локальный bait для косметических adblock-фильтров, Brave self-identification, артефакты автоматизации и защиты от fingerprinting. Никакого запроса камеры, микрофона, геолокации, локальных шрифтов, USB/Bluetooth или активации сенсоров. Permissions API только читает статус. Permissions-Policy страницы запрещает только камеру, микрофон и геолокацию (страница их не использует), поэтому `denied` для них может отражать эту политику; статусы сенсоров показываются как есть.
 
 ## Внешние соединения
 
@@ -154,3 +154,10 @@ DNS_TEST_TOKEN=<тот-же-секрет>
 Ни одна из переменных не должна иметь префикс `NEXT_PUBLIC_`. Вручную проверьте делегирование (`dig NS dnscheck.example.com`), затем запустите DNS-тест в UI. Будут показаны IP рекурсивных резолверов и типы наблюдённых запросов. Сравните их с ожидаемыми резолверами VPN. DoH, shared resolvers и forwarding означают, что адрес наблюдаемого DNS не всегда принадлежит вашему ISP; автоматический вывод «утечка» не делается.
 
 HTTP API companion: `GET /start` → `{ id, hosts, expiresIn }`; `GET /result?id=...` → `{ resolvers, observedResolvers, expiresIn, interpretation }`. Оба запроса требуют `Authorization: Bearer ...`. Результат одной сессии нельзя получить без её случайного 128-битного идентификатора и серверного токена.
+
+## Безопасность и ограничения
+
+- `next.config.ts` задаёт CSP (скрипты и стили только с собственного origin, `frame-ancestors 'none'`), `Referrer-Policy: no-referrer`, COOP и запрет кэширования.
+- `/api/whoami` и `/api/network` имеют простой in-memory rate limit на IP (12 и 60 запросов в минуту). Это best-effort: инстансы serverless не делят память. Для жёсткой защиты включите правило Rate Limiting в Vercel Firewall.
+- Страница помечена `noindex`: это личный инструмент, а бесплатное IP-обогащение (ipwho.is) имеет месячную квоту.
+- Если ipwho.is не возвращает security-флаги (бесплатный тариф), отчёт использует эвристику по названию оператора (VPN/хостинг) и явно помечает её как эвристику.

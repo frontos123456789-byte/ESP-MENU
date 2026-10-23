@@ -102,12 +102,20 @@ export const device: Collector = async () => {
         `Permission · ${name}`,
         async () => {
           if (!navigator.permissions) return null;
-          return (
-            await navigator.permissions.query({ name: name as PermissionName })
-          ).state;
+          try {
+            return (
+              await navigator.permissions.query({
+                name: name as PermissionName,
+              })
+            ).state;
+          } catch (e) {
+            // Browsers throw TypeError for permission names they do not implement.
+            if (e instanceof TypeError) return null;
+            throw e;
+          }
         },
         "low",
-        "Только чтение статуса; запрос разрешения не выполняется. Denied может отражать Permissions-Policy этой страницы.",
+        "Только чтение статуса; запрос разрешения не выполняется. Для камеры, микрофона и геолокации denied может отражать Permissions-Policy этой страницы.",
       ),
     ),
     probe(

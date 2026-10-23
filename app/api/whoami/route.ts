@@ -1,15 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isIP } from "node:net";
-import { isPublicIP } from "@/lib/ip";
+import { clientIP, isPublicIP } from "@/lib/ip";
+import { allow } from "@/lib/ratelimit";
+const REDACTED = new Set([
+  "x-vercel-proxy-signature",
+  "x-vercel-proxy-signature-ts",
+  "x-vercel-sc-headers",
+  "x-vercel-oidc-token",
+]);
 export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
   try {
-    const headers = Object.fromEntries(request.headers.entries());
-    const candidate = (
-      headers["x-forwarded-for"]?.split(",")[0] ||
-      headers["x-real-ip"] ||
-      ""
-    ).trim();
+    const headers = Object.fromEntries(
+      [...request.headers.entries()].map(([k, v]) => [
+        k,
+        REDACTED.has(k) ? "[redacted]" : v,
+      ]),
+    );
+    const candidate = clientIP((name) => request.headers.get(name));
     const ip = isIP(candidate) ? candidate : null;
     const geo = Object.fromEntries(
       [
@@ -32,7 +40,9 @@ export async function GET(request: NextRequest) {
     );
     let enrichment = null;
     let enrichmentError = null;
-    if (ip && isPublicIP(ip))
+    if (ip && isPublicIP(ip) && !allow(`whoami:${ip}`, 12))
+      enrichmentError = "Слишком много проверок подряд, подождите минуту";
+    else if (ip && isPublicIP(ip))
       try {
         const r = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}`, {
           cache: "no-store",

@@ -32,7 +32,7 @@ export const browser: Collector = async () => {
       probe(
         k,
         k,
-        () => nav[k],
+        () => (k === "doNotTrack" ? (nav[k] ?? "unspecified") : nav[k]),
         [
           "userAgent",
           "platform",

@@ -86,6 +86,20 @@ export function entropyEstimate(fields: Field[]) {
       "Illustrative weighted signal count, NOT measured Shannon entropy or population uniqueness. Correlated features are not statistically calibrated.",
   };
 }
+const HOSTING_PATTERN =
+  /\b(vpn|proxy|mullvad|proton|nord|express ?vpn|surfshark|windscribe|cyberghost|ipvanish|m247|datacamp|cdn77|hetzner|ovh|digitalocean|linode|akamai connected cloud|vultr|choopa|leaseweb|contabo|scaleway|oracle cloud|amazon|aws|google cloud|microsoft azure|alibaba cloud|tencent cloud|hosting|colo(cation)?|data ?center|server)\b/i;
+function hostingHint(connection: unknown): string | null {
+  if (!connection || typeof connection !== "object") return null;
+  const c = connection as Record<string, unknown>;
+  for (const key of ["org", "isp", "domain"]) {
+    const v = c[key];
+    if (typeof v === "string" && HOSTING_PATTERN.test(v)) return v;
+  }
+  return null;
+}
+function familyOf(ip: string) {
+  return ip.includes(":") ? 6 : 4;
+}
 export function privacyReport(sections: Section[]) {
   const findings: Finding[] = [];
   const http = getValue<Whoami>(sections, "http");
@@ -97,15 +111,23 @@ export function privacyReport(sections: Section[]) {
       )
     : [];
   const positives = flags.filter(([, v]) => v === true);
+  const orgHint = flags.length ? null : hostingHint(e?.connection);
   findings.push({
     id: "vpn",
     title: "VPN / proxy / hosting",
-    level: positives.length ? "yellow" : flags.length ? "green" : "unknown",
+    level:
+      positives.length || orgHint
+        ? "yellow"
+        : flags.length
+          ? "green"
+          : "unknown",
     detail: positives.length
       ? `IP-база сообщает: ${positives.map(([k]) => k).join(", ")}. Это классификация, а не доказательство утечки.`
-      : flags.length
-        ? "Провайдер данных не отметил проверенные категории. Ошибки классификации возможны."
-        : "Бесплатный API не вернул security-флаги; наличие VPN неизвестно.",
+      : orgHint
+        ? `Оператор IP («${orgHint}») похож на VPN или дата-центр. Это эвристика по названию организации, а не проверка по базе: возможны ошибки в обе стороны.`
+        : flags.length
+          ? "Провайдер данных не отметил проверенные категории. Ошибки классификации возможны."
+          : "Бесплатный API не вернул security-флаги, а название оператора не похоже на VPN или хостинг; наличие VPN неизвестно.",
   });
   const tz = getValue<string>(sections, "timezone");
   const iptz =
@@ -144,11 +166,16 @@ export function privacyReport(sections: Section[]) {
       : undefined,
   });
   const language = getValue<string>(sections, "language");
+  const languages = getValue<string[]>(sections, "languages");
   const country = http?.geo.country || (e?.country_code as string | undefined);
   let region: string | undefined;
-  try {
-    region = language ? new Intl.Locale(language).region : undefined;
-  } catch {}
+  for (const tag of [language, ...(Array.isArray(languages) ? languages : [])]) {
+    if (!tag) continue;
+    try {
+      region = new Intl.Locale(tag).region;
+    } catch {}
+    if (region) break;
+  }
   findings.push({
     id: "language",
     title: "Язык и страна IP",
@@ -164,12 +191,15 @@ export function privacyReport(sections: Section[]) {
     "ice",
   );
   const httpIP = http?.ip;
-  const exposed = ice?.publicIPs.filter(
-    (ip) =>
-      httpIP &&
-      ip.includes(":") === httpIP.includes(":") &&
-      normalizeIP(ip) !== normalizeIP(httpIP),
-  );
+  const v4Seen = getValue<string>(sections, "ipv4");
+  const v6Seen = getValue<string>(sections, "ipv6");
+  const knownIPs = [httpIP, v4Seen, v6Seen]
+    .filter((ip): ip is string => typeof ip === "string" && ip.length > 0)
+    .map(normalizeIP);
+  const exposed = ice?.publicIPs.filter((ip) => {
+    const sameFamily = knownIPs.filter((k) => familyOf(k) === familyOf(ip));
+    return sameFamily.length > 0 && !sameFamily.includes(normalizeIP(ip));
+  });
   findings.push({
     id: "webrtc",
     title: "WebRTC",
@@ -190,8 +220,8 @@ export function privacyReport(sections: Section[]) {
       ? "Включите защиту WebRTC в VPN/браузере и повторите проверку с включённым VPN."
       : undefined,
   });
-  const v6 = getValue<string>(sections, "ipv6");
-  const v4 = getValue<string>(sections, "ipv4");
+  const v6 = v6Seen;
+  const v4 = v4Seen;
   const ipv6Ice = ice?.publicIPs.filter((ip) => ip.includes(":")) || [];
   findings.push({
     id: "ipv6",
