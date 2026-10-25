@@ -46,7 +46,7 @@ local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
 local enabled = {drone = false, missile = false, interceptor = false, uav = false}
 local HttpService=game:GetService('HttpService')
-local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,radarSize=150,radarTransparency=0.25,positions={menu={x=0,y=0},counter={x=1,y=0},radar={x=1,y=0.2}}}
+local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,radarSize=150,radarTransparency=0.25,showEta=true,showLead=true,threat=true,positions={menu={x=0,y=0},counter={x=1,y=0},radar={x=1,y=0.2}}}
 local settingsFile='uav_esp_settings_'..tostring(game.PlaceId)..'.json'
 local persistenceMessage='Настройки: только текущая сессия'
 local function finite(value,low,high)
@@ -119,6 +119,9 @@ local candidates, marks, connections = {}, {}, {}
 local roster,rosterSet={},{}
 local outlines, speedLabels, motion = {}, {}, {}
 local downState = {}
+local threat, leadLines, topThreat = {}, {}, nil
+local uiRefresh = {}
+local function refreshAll() for _, fn in ipairs(uiRefresh) do fn() end end
 local interceptor -- объявлено заранее: используется в displayKind, определяется ниже
 local METERS_PER_STUD = 0.28
 local OUTLINE_LIMIT = 30 -- Roblox рисует ограниченное число Highlight одновременно
@@ -164,6 +167,8 @@ local function clearMark(object)
     if outlines[object] then outlines[object]:Destroy(); outlines[object] = nil; outlineCount = outlineCount - 1 end
     if speedLabels[object] then speedLabels[object]:Destroy(); speedLabels[object] = nil end
     motion[object] = nil
+    threat[object] = nil
+    if leadLines[object] then leadLines[object]:Destroy(); leadLines[object] = nil end
     if marks[object] then marks[object]:Destroy(); marks[object] = nil end
 end
 local function cleanup()
@@ -414,6 +419,7 @@ local function makeToggle(parent, title, get, set, tagColor)
         render(true)
     end)
     render(false)
+    table.insert(uiRefresh, function() render(true) end)
     return rowF, label, render
 end
 
@@ -448,6 +454,7 @@ local function makeStepper(parent, title, getText, step)
     value.TextWrapped = false
     local minus = stepButton('−', -116)
     local function refresh() value.Text = getText() end
+    table.insert(uiRefresh, refresh)
     plus.Activated:Connect(function() step(1); refresh() end)
     minus.Activated:Connect(function() step(-1); refresh() end)
     refresh()
@@ -480,6 +487,91 @@ end
 
 local function clampStep(value, low, high, delta)
     return math.clamp(value + delta, low, high)
+end
+
+-- ---------- Секция: профили ----------
+local profiles = {
+    {name = 'Лёгкий', apply = function()
+        enabled.drone, enabled.missile, enabled.interceptor, enabled.uav = false, false, false, true
+        prefs.arrows, prefs.alerts, prefs.radar = true, true, false
+        prefs.showSpeed, prefs.showDirection, prefs.showDistance = false, false, true
+        prefs.showEta, prefs.showLead, prefs.threat = true, false, true
+        prefs.outlineTransparency = 1
+        automatic = true
+    end},
+    {name = 'Полный', apply = function()
+        enabled.drone, enabled.missile, enabled.interceptor, enabled.uav = false, false, false, true
+        prefs.arrows, prefs.alerts, prefs.radar = true, true, true
+        prefs.showSpeed, prefs.showDirection, prefs.showDistance = true, true, true
+        prefs.showEta, prefs.showLead, prefs.threat = true, true, true
+        prefs.outlineTransparency = 0.2
+    end},
+    {name = 'Ракеты', apply = function()
+        enabled.drone, enabled.missile, enabled.interceptor, enabled.uav = false, true, false, false
+        prefs.arrows, prefs.alerts, prefs.radar = true, true, true
+        prefs.showSpeed, prefs.showDirection, prefs.showDistance = true, true, true
+        prefs.showEta, prefs.showLead, prefs.threat = true, true, true
+        prefs.outlineTransparency = 0.2
+    end},
+}
+do
+    local content = makeSection('ПРОФИЛИ', true)
+    local buttons = Instance.new('Frame')
+    buttons.BackgroundTransparency = 1
+    buttons.Size = UDim2.new(1,0,0,40)
+    buttons.Parent = content
+    local hint = infoRow(content, 'Набор настроек одним тапом: Лёгкий, Полный или только ракеты', 36)
+    for index, profile in ipairs(profiles) do
+        local b = Instance.new('TextButton')
+        b.Size = UDim2.new(1/3,-4,1,0)
+        b.Position = UDim2.new((index-1)/3,(index-1)*2,0,0)
+        b.Text = profile.name
+        b.TextSize = 13
+        b.Font = Theme.fontBold
+        b.TextColor3 = Theme.text
+        b.BackgroundColor3 = Theme.surfaceHi
+        b.AutoButtonColor = true
+        b.BorderSizePixel = 0
+        b.Parent = buttons
+        addCorner(b, UDim.new(0,8))
+        addStroke(b, Theme.accent, 0.6, 1)
+        b.Activated:Connect(function()
+            profile.apply()
+            changed()
+            refreshAll()
+            hint.Text = 'Профиль применён: ' .. profile.name
+        end)
+    end
+end
+
+-- ---------- Секция: цели рядом ----------
+local listContent, listRows, listEmpty = nil, {}, nil
+do
+    local content = makeSection('ЦЕЛИ РЯДОМ', true)
+    listContent = content
+    for i = 1, 5 do
+        local r = newRow(content, 36, false)
+        r.Visible = false
+        local tag = Instance.new('Frame')
+        tag.AnchorPoint = Vector2.new(0,0.5)
+        tag.Position = UDim2.new(0,10,0.5,0)
+        tag.Size = UDim2.fromOffset(4,18)
+        tag.BorderSizePixel = 0
+        tag.Parent = r
+        addCorner(tag, UDim.new(1,0))
+        local left = newText(r, '', 13)
+        left.Position = UDim2.fromOffset(22,0)
+        left.Size = UDim2.new(1,-150,1,0)
+        left.TextWrapped = false
+        local right = newText(r, '', 12, Theme.textDim, Theme.fontMono)
+        right.AnchorPoint = Vector2.new(1,0)
+        right.Position = UDim2.new(1,-10,0,0)
+        right.Size = UDim2.fromOffset(130,36)
+        right.TextXAlignment = Enum.TextXAlignment.Right
+        right.TextWrapped = false
+        listRows[i] = {row = r, tag = tag, left = left, right = right}
+    end
+    listEmpty = infoRow(content, 'Целей в зоне нет', 32)
 end
 
 -- ---------- Секция: цели ----------
@@ -571,6 +663,15 @@ do
     makeToggle(content, 'Приближается / удаляется',
         function() return prefs.showDirection end,
         function(value) prefs.showDirection = value; changed() end)
+    makeToggle(content, 'Время до подлёта',
+        function() return prefs.showEta end,
+        function(value) prefs.showEta = value; changed() end)
+    makeToggle(content, 'Линия упреждения',
+        function() return prefs.showLead end,
+        function(value) prefs.showLead = value; changed() end)
+    makeToggle(content, 'Выделять главную угрозу',
+        function() return prefs.threat end,
+        function(value) prefs.threat = value; changed() end)
 end
 
 -- ---------- Секция: радар ----------
@@ -770,6 +871,11 @@ end
 local function bracketSize() return 30+prefs.dotSize*3 end
 local function iconScale(box) return math.clamp((box-14)/22,0.7,1.3) end
 
+local THREAT_WEIGHT = {missile = 1.5, drone = 1.2, uav = 1.0, interceptor = 0}
+local function etaText(tti)
+    if tti and tti < 90 then return string.format('%d с', math.ceil(tti)) end
+end
+
 local function mark(object, part, kind)
     local color = Theme.kind[kind] or Theme.accent
     local billboard = Instance.new('BillboardGui')
@@ -857,6 +963,31 @@ local function mark(object, part, kind)
     speed.Visible = false
     speed.Parent = root
     speedLabels[object] = speed
+
+    -- Линия упреждения: куда цель летит ближайшие ~1.5 секунды.
+    local lead = Instance.new('Frame')
+    lead.Name = 'ESP_Lead'
+    lead.AnchorPoint = Vector2.new(0,0.5)
+    lead.Size = UDim2.fromOffset(0,2)
+    lead.BackgroundColor3 = color
+    lead.BorderSizePixel = 0
+    lead.Visible = false
+    lead.ZIndex = 5
+    lead.Parent = root
+    local head = Instance.new('TextLabel')
+    head.Name = 'Head'
+    head.AnchorPoint = Vector2.new(0.5,0.5)
+    head.Position = UDim2.new(1,0,0.5,0)
+    head.Size = UDim2.fromOffset(16,16)
+    head.BackgroundTransparency = 1
+    head.Text = '▶'
+    head.TextSize = 14
+    head.Font = Theme.fontBold
+    head.TextColor3 = color
+    head.TextStrokeColor3 = Theme.bg
+    head.TextStrokeTransparency = 0.3
+    head.Parent = lead
+    leadLines[object] = lead
     motion[object] = {part = part, position = part.Position, time = os.clock(), kind = kind, color = color}
     marks[object] = billboard
     return billboard
@@ -906,6 +1037,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
     rayParams.FilterDescendantsInstances = player.Character and {player.Character,camera} or {camera}
     local keep, count = {}, math.min(#visible,48)
+    local bestScore, bestObject = 0, nil
     for i=1,count do
         local item = visible[i]
         keep[item.object] = true
@@ -940,14 +1072,26 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             else sample.closing=nil end
             sample.previousRange,sample.rangeTime,sample.viewer=currentRange,now,viewer
         end
+        local tti
+        if sample.closing and sample.closing>2 then tti=item.d/sample.closing end
+        local weight=THREAT_WEIGHT[item.kind] or 1
+        if tti and tti<=60 and weight>0 then
+            local score=weight*100/(tti+3)
+            threat[item.object]={tti=tti,score=score}
+            if score>bestScore then bestScore,bestObject=score,item.object end
+        else
+            threat[item.object]=tti and {tti=tti,score=0} or nil
+        end
+        local isTop=prefs.threat and item.object==topThreat
         local lines={}
         if prefs.showSpeed then table.insert(lines,sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч') end
         if prefs.showDirection then table.insert(lines,trend) end
         speedLabels[item.object].Text=table.concat(lines,'\n')
         billboard.Adornee = item.part
         billboard.MaxDistance = math.huge -- player-relative range is filtered above
-        billboard.Brackets.Size=UDim2.fromOffset(bracketSize(),bracketSize())
-        billboard.Brackets.Icon.Scale.Scale=iconScale(bracketSize())
+        local box=bracketSize()+(isTop and 8 or 0)
+        billboard.Brackets.Size=UDim2.fromOffset(box,box)
+        billboard.Brackets.Icon.Scale.Scale=iconScale(box)
         if outlines[item.object] then outlines[item.object].OutlineTransparency=prefs.outlineTransparency end
         local _, onScreen = camera:WorldToViewportPoint(item.part.Position)
         billboard.Enabled = onScreen
@@ -958,16 +1102,54 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             -- Прямая видимость: яркая рамка. За препятствием: рамка полупрозрачная.
             local fade = math.clamp(item.d/distance,0,1)*0.4
             local barTransparency = unobstructed and fade or math.max(0.55,fade)
+            local markColor = isTop and Theme.danger or motion[item.object].color
             for _, bar in ipairs(billboard.Brackets:GetChildren()) do
-                if bar.Name=='Bar' then bar.BackgroundTransparency = barTransparency end
+                if bar.Name=='Bar' then
+                    bar.BackgroundTransparency = barTransparency
+                    bar.BackgroundColor3 = markColor
+                end
             end
+            local chipStroke = billboard.Chip:FindFirstChildOfClass('UIStroke')
+            if chipStroke then chipStroke.Color = markColor; chipStroke.Thickness = isTop and 2 or 1 end
             local meters = math.floor(item.d*METERS_PER_STUD+0.5)
-            billboard.Chip.Distance.Text = prefs.showDistance
-                and string.format('%s · %d м',names[item.kind] or '',meters)
-                or (names[item.kind] or '')
+            local parts = {names[item.kind] or ''}
+            if prefs.showDistance then table.insert(parts, string.format('%d м',meters)) end
+            local info = threat[item.object]
+            local eta = prefs.showEta and info and etaText(info.tti)
+            if eta then table.insert(parts, eta) end
+            billboard.Chip.Distance.Text = (isTop and '⚠ ' or '')..table.concat(parts,' · ')
         end
     end
     for object in pairs(marks) do if not keep[object] then clearMark(object) end end
+    topThreat = bestObject
+    if listContent and listContent.Visible and panel.Visible then
+        local ranked = {}
+        for i=1,count do
+            local it = visible[i]
+            local info = threat[it.object]
+            local s = motion[it.object]
+            table.insert(ranked,{object=it.object,kind=it.kind,d=it.d,speed=s and s.speed,tti=info and info.tti,score=info and info.score or 0})
+        end
+        table.sort(ranked,function(a,b)
+            if a.score~=b.score then return a.score>b.score end
+            return a.d<b.d
+        end)
+        for i,slot in ipairs(listRows) do
+            local entry = ranked[i]
+            slot.row.Visible = entry~=nil
+            if entry then
+                local top = prefs.threat and entry.object==topThreat
+                slot.tag.BackgroundColor3 = top and Theme.danger or (Theme.kind[entry.kind] or Theme.accent)
+                slot.left.Text = (top and '⚠ ' or '')..string.format('%s · %d м',names[entry.kind] or '',math.floor(entry.d*METERS_PER_STUD+0.5))
+                local bits = {}
+                if entry.speed then table.insert(bits,string.format('%d км/ч',math.floor(entry.speed*METERS_PER_STUD*3.6+0.5))) end
+                local eta = etaText(entry.tti)
+                if eta then table.insert(bits,eta) end
+                slot.right.Text = table.concat(bits,' · ')
+            end
+        end
+        listEmpty.Visible = #ranked==0
+    end
     status.Text = string.format('FPS: %d  ·  кандидатов: %d  ·  меток: %d\nРаспознавание по именам объектов',math.floor(fps),found,count)
 end))
 
@@ -1005,6 +1187,30 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
                     local inset = screen.Y-center.Y
                     label.Position = UDim2.fromOffset(screen.X-root.AbsolutePosition.X,top+inset-root.AbsolutePosition.Y-4)
                     label.Visible = true
+                end
+            end
+            local lead = leadLines[object]
+            if lead then
+                lead.Visible = false
+                local sample = motion[object]
+                if prefs.showLead and onScreen and sample and sample.velocity and sample.speed and sample.speed > 3 then
+                    local p0 = camera:WorldToScreenPoint(cf.Position)
+                    local p1 = camera:WorldToScreenPoint(cf.Position + sample.velocity*1.5)
+                    if p0.Z > 0 and p1.Z > 0 then
+                        local dir = Vector2.new(p1.X-p0.X, p1.Y-p0.Y)
+                        local length = dir.Magnitude
+                        if length > 8 then
+                            local unit = dir/length
+                            local start = Vector2.new(p0.X,p0.Y) + unit*(bracketSize()/2+2)
+                            local color = (prefs.threat and object==topThreat) and Theme.danger or (sample.color or Theme.accent)
+                            lead.BackgroundColor3 = color
+                            lead.Head.TextColor3 = color
+                            lead.Position = UDim2.fromOffset(start.X-root.AbsolutePosition.X, start.Y-root.AbsolutePosition.Y)
+                            lead.Size = UDim2.fromOffset(math.clamp(length,14,70),2)
+                            lead.Rotation = math.deg(math.atan2(unit.Y,unit.X))
+                            lead.Visible = true
+                        end
+                    end
                 end
             end
         end
@@ -1256,7 +1462,12 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
         warning.Text=string.format('⚠  БПЛА приближается · %d м',math.floor(nearestRange*METERS_PER_STUD+0.5))
     end
     showWarning(prefs.alerts and now<warningUntil)
-    table.sort(found,function(a,b)return a.range<b.range end)
+    table.sort(found,function(a,b)
+        local ta,tb=threat[a.object],threat[b.object]
+        local sa,sb=ta and ta.score or 0,tb and tb.score or 0
+        if sa~=sb then return sa>sb end
+        return a.range<b.range
+    end)
     offscreenTargets={}
     for i=1,math.min(4,#found) do offscreenTargets[i]=found[i] end
 end))
@@ -1272,14 +1483,17 @@ table.insert(connections,RunService.RenderStepped:Connect(function()
                 local x,y,rotation=edgePoint(localPosition.X,-localPosition.Y,root.AbsoluteSize.X,root.AbsoluteSize.Y)
                 slot.frame.Position=UDim2.fromOffset(x,y)
                 slot.arrow.Rotation=rotation
-                local color=Theme.kind[target.kind] or Theme.warn
+                local isTop=prefs.threat and target.object==topThreat
+                local color=isTop and Theme.danger or (Theme.kind[target.kind] or Theme.warn)
                 slot.arrow.TextColor3=color
                 slot.chipStroke.Color=color
                 -- Ближайшая цель крупнее и ярче остальных.
-                slot.arrow.TextSize=i==1 and 26 or 19
+                slot.arrow.TextSize=(i==1 or isTop) and 26 or 19
                 slot.arrow.TextTransparency=i==1 and 0 or 0.25
                 slot.chip.Visible=prefs.showDistance
-                slot.label.Text=string.format('%d м',math.floor(target.range*METERS_PER_STUD+0.5))
+                local info=threat[target.object]
+                local eta=prefs.showEta and info and etaText(info.tti)
+                slot.label.Text=string.format('%d м',math.floor(target.range*METERS_PER_STUD+0.5))..(eta and (' · '..eta) or '')
                 slot.frame.Visible=true
             end
         end
