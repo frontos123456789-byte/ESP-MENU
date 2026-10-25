@@ -21,6 +21,7 @@ local Theme = {
     danger    = Color3.fromRGB(235,70,70),
     kind = {
         uav     = Color3.fromRGB(0,190,255),
+        interceptor = Color3.fromRGB(64,220,120),
         drone   = Color3.fromRGB(255,184,48),
         missile = Color3.fromRGB(255,82,82),
     },
@@ -43,7 +44,7 @@ gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
 gui.Parent = parent
 local alive, automatic, calibrating = true, false, false
 local distance, averageDt, elapsed, adjustTime = 1500, 1/60, 0, 0
-local enabled = {drone = false, missile = false, uav = false}
+local enabled = {drone = false, missile = false, interceptor = false, uav = false}
 local HttpService=game:GetService('HttpService')
 local prefs={dotSize=4,outlineTransparency=0.2,showSpeed=true,showDistance=true,arrows=true,alerts=true,alertMeters=200,showDirection=true,radar=true,radarMeters=300,radarSize=150,radarTransparency=0.25,positions={menu={x=0,y=0},counter={x=1,y=0},radar={x=1,y=0.2}}}
 local settingsFile='uav_esp_settings_'..tostring(game.PlaceId)..'.json'
@@ -117,13 +118,16 @@ end
 local candidates, marks, connections = {}, {}, {}
 local roster,rosterSet={},{}
 local outlines, speedLabels, motion = {}, {}, {}
+local downState = {}
+local interceptor -- объявлено заранее: используется в displayKind, определяется ниже
 local METERS_PER_STUD = 0.28
 local OUTLINE_LIMIT = 30 -- Roblox рисует ограниченное число Highlight одновременно
 local outlineCount = 0
-local names = {drone = 'Дрон', missile = 'Ракета', uav = 'БПЛА'}
+local names = {drone = 'Дрон', missile = 'Ракета', interceptor = 'Перехватчик', uav = 'БПЛА'}
 -- Add exact object names here if the game uses different names.
 local patterns = {
-    missile = {'missile', 'rocket', 'ракет', 'Ракет', 'РАКЕТ'},
+    interceptor = {'stinger', 'interceptor', 'перехват', 'Перехват', 'ПЕРЕХВАТ'},
+    missile = {'missile', 'rocket', 'guided', 'ракет', 'Ракет', 'РАКЕТ', 'управляем', 'Управляем'},
     drone = {'drone', 'fpv', 'дрон', 'Дрон', 'ДРОН'},
     uav = {'uav', 'ucav', 'shahed', 'geran', 'lancet', 'бпла', 'БПЛА', 'шахед', 'Шахед', 'Герань', 'Ланцет'},
 }
@@ -146,7 +150,7 @@ end
 local function classify(object)
     if not (object:IsA('Model') or object:IsA('BasePart')) then return end
     local name = string.lower(object.Name)
-    for _, kind in ipairs({'missile', 'drone', 'uav'}) do
+    for _, kind in ipairs({'interceptor', 'missile', 'drone', 'uav'}) do
         for _, word in ipairs(patterns[kind]) do
             if string.find(name, word, 1, true) then return kind end
         end
@@ -481,8 +485,8 @@ end
 -- ---------- Секция: цели ----------
 do
     local content = makeSection('ЦЕЛИ', true)
-    local titles = {drone = 'Дроны', missile = 'Ракеты', uav = 'Все БПЛА'}
-    for _, kind in ipairs({'drone', 'missile', 'uav'}) do
+    local titles = {drone = 'Дроны', missile = 'Управляемые ракеты', interceptor = 'Ракеты-перехватчики', uav = 'Все БПЛА'}
+    for _, kind in ipairs({'drone', 'missile', 'interceptor', 'uav'}) do
         makeToggle(content, titles[kind],
             function() return enabled[kind] end,
             function(value) enabled[kind] = value; changed() end,
@@ -612,6 +616,7 @@ end
 table.insert(connections, workspace.DescendantAdded:Connect(register))
 table.insert(connections, workspace.DescendantRemoving:Connect(function(object)
     candidates[object] = nil
+    downState[object] = nil
     clearMark(object)
 end))
 task.spawn(function()
@@ -628,6 +633,59 @@ task.spawn(function()
         if processed%200==0 then task.wait() end
     end
 end)
+-- ===== Упавшие / сбитые цели не показываем =====
+local WRECK_WORDS = {'wreck','debris','crash','destroyed','обломк','Обломк','сбит','Сбит','упал','Упал','разбит'}
+local DOWN_FLAGS = {'Destroyed','Dead','Crashed','Downed','Exploded','ShotDown','IsDead','Broken'}
+local HEALTH_KEYS = {'Health','HP','health','hp'}
+local function flagValue(object,key)
+    local attr=object:GetAttribute(key)
+    if attr~=nil then return attr end
+    local child=object:FindFirstChild(key)
+    if child and child:IsA('ValueBase') then
+        local ok,value=pcall(function() return child.Value end)
+        if ok then return value end
+    end
+end
+local function isDowned(object,part)
+    -- 1) Имя или флаги говорят, что объект уничтожен.
+    local lowered=string.lower(object.Name)
+    for _,word in ipairs(WRECK_WORDS) do
+        if string.find(lowered,word,1,true) or string.find(object.Name,word,1,true) then return true end
+    end
+    for _,key in ipairs(DOWN_FLAGS) do
+        if flagValue(object,key)==true then return true end
+    end
+    for _,key in ipairs(HEALTH_KEYS) do
+        local value=flagValue(object,key)
+        if type(value)=='number' and value<=0 then return true end
+    end
+    -- 2) Лежит на земле без движения 3+ секунды = упал.
+    local now=os.clock()
+    local state=downState[object]
+    if not state then
+        downState[object]={position=part.Position,time=now,down=false}
+        return false
+    end
+    local elapsed=now-state.time
+    if elapsed<0.4 then return state.down end
+    local speed=(part.Position-state.position).Magnitude/elapsed
+    state.position,state.time=part.Position,now
+    if speed<1.5 then
+        state.stillSince=state.stillSince or now
+    else
+        state.stillSince=nil
+        state.down=false
+    end
+    if state.stillSince and now-state.stillSince>=3 then
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        local ignore={object}
+        if player.Character then table.insert(ignore,player.Character) end
+        params.FilterDescendantsInstances=ignore
+        state.down=workspace:Raycast(part.Position,Vector3.new(0,-10,0),params)~=nil
+    end
+    return state.down
+end
 local function displayKind(object)
     if not object:IsDescendantOf(workspace) then return end
     if not rosterSet[object] then
@@ -639,7 +697,9 @@ local function displayKind(object)
     end
     if blockedAncestor(object,player.Character) then return end
     if object:IsA('Model') and object:FindFirstChildOfClass('Humanoid') then return end
-    return classify(object) or (rosterSet[object] and 'uav' or nil)
+    local kind=classify(object) or (rosterSet[object] and 'uav' or nil)
+    if kind=='missile' and interceptor and interceptor(object) then kind='interceptor' end
+    return kind
 end
 local function measuredVelocity(previousPart,currentPart,previousPosition,position,dt)
     if previousPart~=currentPart or dt<0.15 or dt>2 then return nil end
@@ -647,11 +707,74 @@ local function measuredVelocity(previousPart,currentPart,previousPosition,positi
     if velocity.Magnitude>2000 then return nil end
     return velocity
 end
+-- Значки типов целей рисуются из Frame в сетке 22×22 (цвет задаёт тип).
+local function iconPart(parent,x,y,w,h,color,round,rotation)
+    local f=Instance.new('Frame')
+    f.AnchorPoint=Vector2.new(0.5,0.5)
+    f.Position=UDim2.fromOffset(x,y)
+    f.Size=UDim2.fromOffset(w,h)
+    f.BackgroundColor3=color
+    f.BorderSizePixel=0
+    f.Rotation=rotation or 0
+    f.Parent=parent
+    if round then addCorner(f,UDim.new(round,0)) end
+    return f
+end
+local function buildIcon(parent,kind,color)
+    local icon=Instance.new('Frame')
+    icon.Name='Icon'
+    icon.BackgroundTransparency=1
+    icon.AnchorPoint=Vector2.new(0.5,0.5)
+    icon.Position=UDim2.fromScale(0.5,0.5)
+    icon.Size=UDim2.fromOffset(22,22)
+    icon.Parent=parent
+    local scale=Instance.new('UIScale')
+    scale.Name='Scale'
+    scale.Parent=icon
+    if kind=='drone' then
+        -- FPV-квадрокоптер: две перекладины, 4 ротора, корпус
+        iconPart(icon,11,11,24,2.5,color,nil,45)
+        iconPart(icon,11,11,24,2.5,color,nil,-45)
+        for _,pos in ipairs({{3.5,3.5},{18.5,3.5},{3.5,18.5},{18.5,18.5}}) do
+            iconPart(icon,pos[1],pos[2],6,6,color,0.5)
+        end
+        iconPart(icon,11,11,6,6,Theme.bg,0.2)
+        iconPart(icon,11,11,3.5,3.5,color,0.2)
+    elseif kind=='missile' or kind=='interceptor' then
+        -- Ракета: корпус, нос, оперение, факел
+        iconPart(icon,11,10,6,15,color,0.5)
+        iconPart(icon,11,3,5,5,color,nil,45)
+        iconPart(icon,6.5,16,3,6,color)
+        iconPart(icon,15.5,16,3,6,color)
+        iconPart(icon,11,20,3,4,Theme.warn,0.5)
+        if kind=='interceptor' then
+            -- Перехватчик: та же ракета в круге-прицеле
+            local ring=Instance.new('Frame')
+            ring.BackgroundTransparency=1
+            ring.AnchorPoint=Vector2.new(0.5,0.5)
+            ring.Position=UDim2.fromScale(0.5,0.5)
+            ring.Size=UDim2.fromOffset(26,26)
+            ring.Parent=icon
+            addCorner(ring,UDim.new(1,0))
+            addStroke(ring,color,0,1.5)
+        end
+    else
+        -- БПЛА самолётного типа: фюзеляж, крыло, хвост
+        iconPart(icon,11,11,3.5,20,color,0.5)
+        iconPart(icon,11,12,22,3.5,color,0.3)
+        iconPart(icon,11,19,10,2.5,color,0.3)
+        iconPart(icon,11,3,4,4,color,nil,45)
+    end
+    return icon
+end
+local function bracketSize() return 30+prefs.dotSize*3 end
+local function iconScale(box) return math.clamp((box-14)/22,0.7,1.3) end
+
 local function mark(object, part, kind)
     local color = Theme.kind[kind] or Theme.accent
     local billboard = Instance.new('BillboardGui')
     billboard.Name = 'UAV_ESP_Marker'
-    billboard.Size = UDim2.fromOffset(150,90)
+    billboard.Size = UDim2.fromOffset(150,110)
     billboard.AlwaysOnTop = true
     billboard.Adornee = part
     billboard.Parent = gui
@@ -662,8 +785,9 @@ local function mark(object, part, kind)
     brackets.BackgroundTransparency = 1
     brackets.AnchorPoint = Vector2.new(0.5,0.5)
     brackets.Position = UDim2.fromScale(0.5,0.5)
-    brackets.Size = UDim2.fromOffset(24+prefs.dotSize*3,24+prefs.dotSize*3)
+    brackets.Size = UDim2.fromOffset(bracketSize(),bracketSize())
     brackets.Parent = billboard
+    buildIcon(brackets,kind,color).Scale.Scale = iconScale(bracketSize())
     local barLength, barThickness = 8, 2
     for _, corner in ipairs({{0,0},{1,0},{0,1},{1,1}}) do
         for _, horizontal in ipairs({true,false}) do
@@ -682,7 +806,7 @@ local function mark(object, part, kind)
     local chip = Instance.new('Frame')
     chip.Name = 'Chip'
     chip.AnchorPoint = Vector2.new(0.5,0)
-    chip.Position = UDim2.new(0.5,0,0.5,22)
+    chip.Position = UDim2.new(0.5,0,0.5,34)
     chip.Size = UDim2.fromOffset(0,20)
     chip.AutomaticSize = Enum.AutomaticSize.X
     chip.BackgroundColor3 = Theme.bg
@@ -765,9 +889,10 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         checked[object]=true
         local kind=displayKind(object)
         if not kind then return end
+        local part=targetPart(object)
+        if part and isDowned(object,part) then return end
         found=found+1
         if enabled[kind] or enabled.uav then
-            local part=targetPart(object)
             if part then
                 local d=(origin-part.Position).Magnitude
                 if d<=distance then table.insert(visible,{object=object,part=part,kind=kind,d=d}) end
@@ -821,7 +946,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         speedLabels[item.object].Text=table.concat(lines,'\n')
         billboard.Adornee = item.part
         billboard.MaxDistance = math.huge -- player-relative range is filtered above
-        billboard.Brackets.Size=UDim2.fromOffset(24+prefs.dotSize*3,24+prefs.dotSize*3)
+        billboard.Brackets.Size=UDim2.fromOffset(bracketSize(),bracketSize())
+        billboard.Brackets.Icon.Scale.Scale=iconScale(bracketSize())
         if outlines[item.object] then outlines[item.object].OutlineTransparency=prefs.outlineTransparency end
         local _, onScreen = camera:WorldToViewportPoint(item.part.Position)
         billboard.Enabled = onScreen
@@ -833,7 +959,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             local fade = math.clamp(item.d/distance,0,1)*0.4
             local barTransparency = unobstructed and fade or math.max(0.55,fade)
             for _, bar in ipairs(billboard.Brackets:GetChildren()) do
-                if bar:IsA('Frame') then bar.BackgroundTransparency = barTransparency end
+                if bar.Name=='Bar' then bar.BackgroundTransparency = barTransparency end
             end
             local meters = math.floor(item.d*METERS_PER_STUD+0.5)
             billboard.Chip.Distance.Text = prefs.showDistance
@@ -945,7 +1071,7 @@ local function rocketLike(object)
         or parentName:find('rocket',1,true) or parentName:find('missile',1,true)
         or name:find('Ракет',1,true) or name:find('ракет',1,true)
 end
-local function interceptor(object)
+function interceptor(object)
     local name=string.lower(object.Name)
     if name:find('stinger',1,true) or name:find('interceptor',1,true) then return true end
     return rocketLike(object) and isPlayerOwner(metadata(object,ownerKeys))
@@ -956,7 +1082,8 @@ local function rebuildRoster()
     local character=player.Character
     local function add(object)
         if seen[object] or interceptor(object) or blockedAncestor(object,character) then return end
-        if targetPart(object) then seen[object]=true;rosterSet[object]=true;table.insert(roster,object) end
+        local part=targetPart(object)
+        if part and not isDowned(object,part) then seen[object]=true;rosterSet[object]=true;table.insert(roster,object) end
     end
     local droneFolder=workspace:FindFirstChild('Drones')
     if droneFolder then
