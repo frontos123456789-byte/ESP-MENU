@@ -783,7 +783,7 @@ local function isDowned(object,part)
         local ignore={object}
         if player.Character then table.insert(ignore,player.Character) end
         params.FilterDescendantsInstances=ignore
-        state.down=workspace:Raycast(part.Position,Vector3.new(0,-10,0),params)~=nil
+        state.down=workspace:Raycast(part.Position,Vector3.new(0,-(math.max(part.Size.Y/2,1)+2),0),params)~=nil
     end
     return state.down
 end
@@ -868,8 +868,8 @@ local function buildIcon(parent,kind,color)
     end
     return icon
 end
-local function bracketSize() return 30+prefs.dotSize*3 end
-local function iconScale(box) return math.clamp((box-14)/22,0.7,1.3) end
+local function bracketSize() return 18+prefs.dotSize*2 end
+local function iconScale(box) return math.clamp((box-8)/22,0.55,1.2) end
 
 local THREAT_WEIGHT = {missile = 1.5, drone = 1.2, uav = 1.0, interceptor = 0}
 local function etaText(tti)
@@ -880,7 +880,7 @@ local function mark(object, part, kind)
     local color = Theme.kind[kind] or Theme.accent
     local billboard = Instance.new('BillboardGui')
     billboard.Name = 'UAV_ESP_Marker'
-    billboard.Size = UDim2.fromOffset(150,110)
+    billboard.Size = UDim2.fromOffset(120,70)
     billboard.AlwaysOnTop = true
     billboard.Adornee = part
     billboard.Parent = gui
@@ -894,7 +894,7 @@ local function mark(object, part, kind)
     brackets.Size = UDim2.fromOffset(bracketSize(),bracketSize())
     brackets.Parent = billboard
     buildIcon(brackets,kind,color).Scale.Scale = iconScale(bracketSize())
-    local barLength, barThickness = 8, 2
+    local barLength, barThickness = 6, 2
     for _, corner in ipairs({{0,0},{1,0},{0,1},{1,1}}) do
         for _, horizontal in ipairs({true,false}) do
             local bar = Instance.new('Frame')
@@ -912,25 +912,25 @@ local function mark(object, part, kind)
     local chip = Instance.new('Frame')
     chip.Name = 'Chip'
     chip.AnchorPoint = Vector2.new(0.5,0)
-    chip.Position = UDim2.new(0.5,0,0.5,34)
-    chip.Size = UDim2.fromOffset(0,20)
+    chip.Position = UDim2.new(0.5,0,0.5,bracketSize()/2+3)
+    chip.Size = UDim2.fromOffset(0,14)
     chip.AutomaticSize = Enum.AutomaticSize.X
     chip.BackgroundColor3 = Theme.bg
-    chip.BackgroundTransparency = 0.25
+    chip.BackgroundTransparency = 0.4
     chip.BorderSizePixel = 0
     chip.Parent = billboard
     addCorner(chip, UDim.new(1,0))
-    addStroke(chip, color, 0.35, 1)
+    addStroke(chip, color, 0.55, 1)
     local chipPad = Instance.new('UIPadding', chip)
-    chipPad.PaddingLeft = UDim.new(0,9)
-    chipPad.PaddingRight = UDim.new(0,9)
+    chipPad.PaddingLeft = UDim.new(0,5)
+    chipPad.PaddingRight = UDim.new(0,5)
     local label = Instance.new('TextLabel')
     label.Name = 'Distance'
     label.BackgroundTransparency = 1
-    label.Size = UDim2.fromOffset(0,20)
+    label.Size = UDim2.fromOffset(0,14)
     label.AutomaticSize = Enum.AutomaticSize.X
     label.TextColor3 = Theme.text
-    label.TextSize = 12
+    label.TextSize = 10
     label.Font = Theme.fontMono
     label.Text = names[kind] or ''
     label.Parent = chip
@@ -952,13 +952,13 @@ local function mark(object, part, kind)
     local speed = Instance.new('TextLabel')
     speed.Name = 'ESP_Speed'
     speed.AnchorPoint = Vector2.new(0.5,1)
-    speed.Size = UDim2.fromOffset(190,32)
+    speed.Size = UDim2.fromOffset(150,13)
     speed.BackgroundTransparency = 1
     speed.TextColor3 = Theme.text
     speed.TextTransparency = 0.05
     speed.TextStrokeColor3 = Theme.bg
     speed.TextStrokeTransparency = 0.35
-    speed.TextSize = 12
+    speed.TextSize = 10
     speed.Font = Theme.fontMono
     speed.Visible = false
     speed.Parent = root
@@ -968,7 +968,7 @@ local function mark(object, part, kind)
     local lead = Instance.new('Frame')
     lead.Name = 'ESP_Lead'
     lead.AnchorPoint = Vector2.new(0,0.5)
-    lead.Size = UDim2.fromOffset(0,2)
+    lead.Size = UDim2.fromOffset(0,1.5)
     lead.BackgroundColor3 = color
     lead.BorderSizePixel = 0
     lead.Visible = false
@@ -978,17 +978,17 @@ local function mark(object, part, kind)
     head.Name = 'Head'
     head.AnchorPoint = Vector2.new(0.5,0.5)
     head.Position = UDim2.new(1,0,0.5,0)
-    head.Size = UDim2.fromOffset(16,16)
+    head.Size = UDim2.fromOffset(12,12)
     head.BackgroundTransparency = 1
     head.Text = '▶'
-    head.TextSize = 14
+    head.TextSize = 11
     head.Font = Theme.fontBold
     head.TextColor3 = color
     head.TextStrokeColor3 = Theme.bg
     head.TextStrokeTransparency = 0.3
     head.Parent = lead
     leadLines[object] = lead
-    motion[object] = {part = part, position = part.Position, time = os.clock(), kind = kind, color = color}
+    motion[object] = {part = part, position = part.Position, time = os.clock(), kind = kind, color = color, history = {}}
     marks[object] = billboard
     return billboard
 end
@@ -1046,20 +1046,29 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
         local now = os.clock()
         local delta = now-sample.time
         if delta>=0.15 or sample.part~=item.part then
-            local velocity=measuredVelocity(sample.part,item.part,sample.position,item.part.Position,delta)
-            if velocity then
-                sample.velocity=sample.velocity and sample.velocity:Lerp(velocity,0.5) or velocity
-                sample.speed=sample.speed and (sample.speed*0.5+velocity.Magnitude*0.5) or velocity.Magnitude
-            else
-                sample.speed,sample.velocity,sample.closing,sample.previousRange=nil,nil,nil,nil
+            local position=item.part.Position
+            local history=sample.history
+            local last=history[#history]
+            if sample.part~=item.part or (last and (delta>2 or (position-last.position).Magnitude/math.max(delta,0.001)>2000)) then
+                -- смена части, пауза или телепорт: замеры начинаем заново
+                history={}
+                sample.history=history
+                sample.speed,sample.velocity,sample.drawVelocity=nil,nil,nil
+                sample.closing,sample.previousRange=nil,nil
             end
-        end
-        if delta >= 0.15 or sample.part ~= item.part then
-            sample.position, sample.time, sample.part = item.part.Position, now, item.part
+            table.insert(history,{time=now,position=position})
+            while #history>1 and now-history[1].time>1.2 do table.remove(history,1) end
+            local span=now-history[1].time
+            if span>=0.45 then
+                local velocity=(position-history[1].position)/span
+                sample.velocity=sample.velocity and sample.velocity:Lerp(velocity,0.5) or velocity
+                sample.speed=sample.velocity.Magnitude
+            end
+            sample.position, sample.time, sample.part = position, now, item.part
         end
         local character=player.Character
         local viewer=character and (character:FindFirstChild('HumanoidRootPart') or character:FindFirstChild('Head'))
-        local trend='нет замера'
+        local trend=nil
         if viewer then
             local currentRange=(item.part.Position-viewer.Position).Magnitude
             local dtRange=sample.rangeTime and now-sample.rangeTime or 0
@@ -1067,7 +1076,7 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                 local closing=(sample.previousRange-currentRange)/dtRange
                 if math.abs(closing)<2000 then
                     sample.closing=sample.closing and sample.closing*0.5+closing*0.5 or closing
-                    trend=sample.closing>2 and 'приближается' or (sample.closing < -2 and 'удаляется' or 'дистанция стабильна')
+                    trend=sample.closing>2 and 'к вам' or (sample.closing < -2 and 'от вас' or 'вбок')
                 else sample.closing=nil end
             else sample.closing=nil end
             sample.previousRange,sample.rangeTime,sample.viewer=currentRange,now,viewer
@@ -1083,13 +1092,16 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
             threat[item.object]=tti and {tti=tti,score=0} or nil
         end
         local isTop=prefs.threat and item.object==topThreat
+        -- Подпись скорости только у трёх ближайших и у главной угрозы: меньше каши на экране.
+        sample.showInfo=(i<=3) or isTop
         local lines={}
         if prefs.showSpeed then table.insert(lines,sample.speed and string.format('%d км/ч',math.floor(sample.speed*METERS_PER_STUD*3.6+0.5)) or '— км/ч') end
-        if prefs.showDirection then table.insert(lines,trend) end
-        speedLabels[item.object].Text=table.concat(lines,'\n')
+        if prefs.showDirection and trend then table.insert(lines,trend) end
+        speedLabels[item.object].Text=table.concat(lines,' · ')
         billboard.Adornee = item.part
         billboard.MaxDistance = math.huge -- player-relative range is filtered above
-        local box=bracketSize()+(isTop and 8 or 0)
+        local box=bracketSize()+(isTop and 6 or 0)
+        billboard.Chip.Position=UDim2.new(0.5,0,0.5,box/2+3)
         billboard.Brackets.Size=UDim2.fromOffset(box,box)
         billboard.Brackets.Icon.Scale.Scale=iconScale(box)
         if outlines[item.object] then outlines[item.object].OutlineTransparency=prefs.outlineTransparency end
@@ -1148,16 +1160,17 @@ table.insert(connections, RunService.RenderStepped:Connect(function(dt)
                 slot.right.Text = table.concat(bits,' · ')
             end
         end
-        listEmpty.Visible = #ranked==0
+        listEmpty.Parent.Visible = #ranked==0
     end
     status.Text = string.format('FPS: %d  ·  кандидатов: %d  ·  меток: %d\nРаспознавание по именам объектов',math.floor(fps),found,count)
 end))
 
 -- Reproject the top of the object's bounds every frame so the caption follows the camera.
-table.insert(connections, RunService.RenderStepped:Connect(function()
+table.insert(connections, RunService.RenderStepped:Connect(function(dt)
     local camera = workspace.CurrentCamera
     for object, label in pairs(speedLabels) do
         label.Visible = false
+        if leadLines[object] then leadLines[object].Visible = false end
         local outline = outlines[object]
         if outline then outline.Enabled = false end
         if camera and object:IsDescendantOf(workspace) then
@@ -1169,7 +1182,8 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
                 outline.Enabled = onScreen
                 outline.OutlineTransparency=prefs.outlineTransparency
             end
-            if onScreen and (prefs.showSpeed or prefs.showDirection) then
+            local sampleInfo = motion[object]
+            if onScreen and (prefs.showSpeed or prefs.showDirection) and sampleInfo and sampleInfo.showInfo then
                 local top, inFront = math.huge, true
                 for x=-1,1,2 do
                     for y=-1,1,2 do
@@ -1191,27 +1205,53 @@ table.insert(connections, RunService.RenderStepped:Connect(function()
             end
             local lead = leadLines[object]
             if lead then
-                lead.Visible = false
                 local sample = motion[object]
-                if prefs.showLead and onScreen and sample and sample.velocity and sample.speed and sample.speed > 3 then
+                local shown = false
+                if sample and sample.velocity then
+                    -- Рисуем по сглаженной скорости: дёрганье измерений не доходит до экрана.
+                    local blendV = 1-math.exp(-dt/0.25)
+                    sample.drawVelocity = sample.drawVelocity and sample.drawVelocity:Lerp(sample.velocity,blendV) or sample.velocity
+                else
+                    if sample then sample.drawVelocity = nil end
+                end
+                local state = sample and sample.lead
+                if sample and not state then state = {on = false}; sample.lead = state end
+                if prefs.showLead and onScreen and sample and sample.drawVelocity and sample.drawVelocity.Magnitude >= 10 then
+                    local velocity = sample.drawVelocity
                     local p0 = camera:WorldToScreenPoint(cf.Position)
-                    local p1 = camera:WorldToScreenPoint(cf.Position + sample.velocity*1.5)
+                    local p1 = camera:WorldToScreenPoint(cf.Position + velocity*1.5)
                     if p0.Z > 0 and p1.Z > 0 then
                         local dir = Vector2.new(p1.X-p0.X, p1.Y-p0.Y)
                         local length = dir.Magnitude
-                        if length > 8 then
-                            local unit = dir/length
-                            local start = Vector2.new(p0.X,p0.Y) + unit*(bracketSize()/2+2)
+                        -- Гистерезис: появляется от 12 px, пропадает только ниже 7 px.
+                        if length >= (state.on and 7 or 12) then
+                            local angle = math.atan2(dir.Y,dir.X)
+                            local px = math.clamp(length,12,60)
+                            if state.angle then
+                                local diff = (angle-state.angle+math.pi)%(2*math.pi)-math.pi
+                                local blendA = 1-math.exp(-dt/0.08)
+                                state.angle = state.angle + diff*blendA
+                                state.length = state.length + (px-state.length)*blendA
+                            else
+                                state.angle, state.length = angle, px
+                            end
+                            local unit = Vector2.new(math.cos(state.angle),math.sin(state.angle))
+                            local start = Vector2.new(p0.X,p0.Y) + unit*(bracketSize()/2+3)
                             local color = (prefs.threat and object==topThreat) and Theme.danger or (sample.color or Theme.accent)
                             lead.BackgroundColor3 = color
                             lead.Head.TextColor3 = color
                             lead.Position = UDim2.fromOffset(start.X-root.AbsolutePosition.X, start.Y-root.AbsolutePosition.Y)
-                            lead.Size = UDim2.fromOffset(math.clamp(length,14,70),2)
-                            lead.Rotation = math.deg(math.atan2(unit.Y,unit.X))
-                            lead.Visible = true
+                            lead.Size = UDim2.fromOffset(state.length,1.5)
+                            lead.Rotation = math.deg(state.angle)
+                            shown = true
                         end
                     end
                 end
+                if state then
+                    state.on = shown
+                    if not shown then state.angle, state.length = nil, nil end
+                end
+                lead.Visible = shown
             end
         end
     end
@@ -1372,29 +1412,53 @@ local function showWarning(visible)
         tween.Completed:Connect(function() if not warningShown then warning.Visible=false end end)
     end
 end
+-- Кольцо-указатель вокруг центра экрана. Стрелка стоит на кольце по азимуту цели:
+-- вверх = прямо по взгляду, вправо = справа, вниз = за спиной. Подпись лежит внутри кольца.
+-- «↑» / «↓» в подписи: цель заметно выше / ниже горизонта.
+local ARROW_SLOTS=4
+local arrowRing=Instance.new('Frame')
+arrowRing.Name='ArrowRing'
+arrowRing.AnchorPoint=Vector2.new(0.5,0.5)
+arrowRing.BackgroundTransparency=1
+arrowRing.Visible=false
+arrowRing.ZIndex=4
+arrowRing.Parent=root
+addCorner(arrowRing,UDim.new(1,0))
+addStroke(arrowRing,Theme.text,0.9,1)
+local ringTick=Instance.new('Frame')
+ringTick.AnchorPoint=Vector2.new(0.5,0)
+ringTick.Position=UDim2.new(0.5,0,0,-1)
+ringTick.Size=UDim2.fromOffset(2,9)
+ringTick.BackgroundColor3=Theme.text
+ringTick.BackgroundTransparency=0.55
+ringTick.BorderSizePixel=0
+ringTick.Parent=arrowRing
 local arrowSlots={}
-for i=1,4 do
+for i=1,ARROW_SLOTS do
     local frame=Instance.new('Frame')
-    frame.AnchorPoint=Vector2.new(0.5,0.5);frame.Size=UDim2.fromOffset(84,56)
-    frame.BackgroundTransparency=1;frame.Visible=false;frame.Parent=root
+    frame.Name='ArrowSlot'
+    frame.AnchorPoint=Vector2.new(0.5,0.5);frame.Size=UDim2.fromOffset(26,26)
+    frame.BackgroundTransparency=1;frame.Visible=false;frame.ZIndex=6;frame.Parent=root
     local arrow=Instance.new('TextLabel')
-    arrow.AnchorPoint=Vector2.new(0.5,0.5);arrow.Position=UDim2.fromScale(0.5,0.3)
-    arrow.Size=UDim2.fromOffset(28,28);arrow.BackgroundTransparency=1
-    arrow.Text='▲';arrow.TextSize=22;arrow.Font=Theme.fontBold;arrow.TextColor3=Theme.warn
+    arrow.Name='Pointer'
+    arrow.AnchorPoint=Vector2.new(0.5,0.5);arrow.Position=UDim2.fromScale(0.5,0.5)
+    arrow.Size=UDim2.fromOffset(26,26);arrow.BackgroundTransparency=1
+    arrow.Text='▲';arrow.TextSize=20;arrow.Font=Theme.fontBold;arrow.TextColor3=Theme.warn
     arrow.TextStrokeColor3=Theme.bg;arrow.TextStrokeTransparency=0.2;arrow.Parent=frame
     local chip=Instance.new('Frame')
-    chip.AnchorPoint=Vector2.new(0.5,0)
-    chip.Position=UDim2.new(0.5,0,0,34);chip.Size=UDim2.fromOffset(0,20)
+    chip.Name='Chip'
+    chip.AnchorPoint=Vector2.new(0.5,0.5)
+    chip.Position=UDim2.fromScale(0.5,0.5);chip.Size=UDim2.fromOffset(0,14)
     chip.AutomaticSize=Enum.AutomaticSize.X
-    chip.BackgroundColor3=Theme.bg;chip.BackgroundTransparency=0.2;chip.BorderSizePixel=0
+    chip.BackgroundColor3=Theme.bg;chip.BackgroundTransparency=0.4;chip.BorderSizePixel=0
     chip.Parent=frame
     addCorner(chip,UDim.new(1,0))
-    local chipStroke=addStroke(chip,Theme.warn,0.35,1)
+    local chipStroke=addStroke(chip,Theme.warn,0.55,1)
     local chipPad=Instance.new('UIPadding',chip)
-    chipPad.PaddingLeft=UDim.new(0,8);chipPad.PaddingRight=UDim.new(0,8)
+    chipPad.PaddingLeft=UDim.new(0,5);chipPad.PaddingRight=UDim.new(0,5)
     local label=Instance.new('TextLabel')
-    label.Size=UDim2.fromOffset(0,20);label.AutomaticSize=Enum.AutomaticSize.X
-    label.BackgroundTransparency=1;label.TextSize=12;label.Font=Theme.fontMono
+    label.Size=UDim2.fromOffset(0,14);label.AutomaticSize=Enum.AutomaticSize.X
+    label.BackgroundTransparency=1;label.TextSize=10;label.Font=Theme.fontMono
     label.TextColor3=Theme.text;label.Parent=chip
     arrowSlots[i]={frame=frame,arrow=arrow,label=label,chip=chip,chipStroke=chipStroke}
 end
@@ -1406,18 +1470,11 @@ local function approaching(previous,position,range,dt,origin)
     local closing=(previous.range-range)/dt
     return radial>2 and closing>2
 end
-local function edgePoint(dx,dy,width,height)
-    if math.abs(dx)+math.abs(dy)<0.001 then dx,dy=0,1 end -- directly behind
-    local halfWidth=math.max(1,width/2-36)
-    local halfHeight=math.max(1,height/2-54)
-    local factor=1/math.max(math.abs(dx)/halfWidth,math.abs(dy)/halfHeight)
-    return width/2+dx*factor,height/2+dy*factor,math.deg(math.atan2(dy,dx))+90
-end
 local approachSamples={}
 local previousCharacter
 local extraElapsed=0
 local warningUntil,lastWarning=0,-math.huge
-local offscreenTargets={}
+local arrowCandidates={}
 table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     extraElapsed=extraElapsed+dt
     if extraElapsed<0.25 then return end
@@ -1430,14 +1487,16 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
         approachSamples={};previousCharacter=character;warningUntil=0
     end
     if not camera or not head or (humanoid and humanoid.Health<=0) then
-        offscreenTargets={};approachSamples={};showWarning(false);return
+        arrowCandidates={};approachSamples={};showWarning(false);return
     end
     local now=os.clock()
     local found,keep={},{}
-    local nearestAlert,nearestRange
+    local nearestAlert,nearestRange,nearestKind
     for _,object in ipairs(roster) do
         local part=targetPart(object)
-        if part then
+        local kind=part and displayKind(object)
+        -- Тревога и стрелки подчиняются тем же фильтрам типов, что и метки.
+        if part and kind and (enabled[kind] or enabled.uav) then
             local position=part.Position
             local range=(position-head.Position).Magnitude
             local previous=approachSamples[object]
@@ -1446,12 +1505,11 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
             local alerted=previous and previous.alerted or false
             if range>threshold*1.2 then alerted=false end
             if prefs.alerts and range<=threshold and not alerted and approaching(previous,position,range,sampleDt,head.Position) then
-                if not nearestRange or range<nearestRange then nearestAlert,nearestRange=object,range end
+                if not nearestRange or range<nearestRange then nearestAlert,nearestRange,nearestKind=object,range,kind end
             end
             keep[object]={position=position,range=range,time=now,alerted=alerted}
             if prefs.arrows and range<=distance then
-                local _,onScreen=camera:WorldToViewportPoint(position)
-                if not onScreen then table.insert(found,{object=object,part=part,range=range,kind=classify(object) or 'uav'}) end
+                table.insert(found,{object=object,part=part,range=range,kind=kind})
             end
         end
     end
@@ -1459,7 +1517,7 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     if nearestAlert and now-lastWarning>=4 then
         approachSamples[nearestAlert].alerted=true
         lastWarning=now;warningUntil=now+3
-        warning.Text=string.format('⚠  БПЛА приближается · %d м',math.floor(nearestRange*METERS_PER_STUD+0.5))
+        warning.Text=string.format('⚠  %s приближается · %d м',names[nearestKind] or 'Цель',math.floor(nearestRange*METERS_PER_STUD+0.5))
     end
     showWarning(prefs.alerts and now<warningUntil)
     table.sort(found,function(a,b)
@@ -1468,36 +1526,100 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
         if sa~=sb then return sa>sb end
         return a.range<b.range
     end)
-    offscreenTargets={}
-    for i=1,math.min(4,#found) do offscreenTargets[i]=found[i] end
+    arrowCandidates={}
+    for i=1,math.min(10,#found) do arrowCandidates[i]=found[i] end
 end))
-table.insert(connections,RunService.RenderStepped:Connect(function()
+local lastFlat=Vector3.new(0,0,-1)
+table.insert(connections,RunService.RenderStepped:Connect(function(dt)
     local camera=workspace.CurrentCamera
-    for i,slot in ipairs(arrowSlots) do
-        slot.frame.Visible=false
-        local target=offscreenTargets[i]
-        if prefs.arrows and camera and target and target.part:IsDescendantOf(workspace) then
-            local _,onScreen=camera:WorldToViewportPoint(target.part.Position)
-            if not onScreen then
-                local localPosition=camera.CFrame:PointToObjectSpace(target.part.Position)
-                local x,y,rotation=edgePoint(localPosition.X,-localPosition.Y,root.AbsoluteSize.X,root.AbsoluteSize.Y)
-                slot.frame.Position=UDim2.fromOffset(x,y)
-                slot.arrow.Rotation=rotation
-                local isTop=prefs.threat and target.object==topThreat
-                local color=isTop and Theme.danger or (Theme.kind[target.kind] or Theme.warn)
-                slot.arrow.TextColor3=color
-                slot.chipStroke.Color=color
-                -- Ближайшая цель крупнее и ярче остальных.
-                slot.arrow.TextSize=(i==1 or isTop) and 26 or 19
-                slot.arrow.TextTransparency=i==1 and 0 or 0.25
-                slot.chip.Visible=prefs.showDistance
-                local info=threat[target.object]
-                local eta=prefs.showEta and info and etaText(info.tti)
-                slot.label.Text=string.format('%d м',math.floor(target.range*METERS_PER_STUD+0.5))..(eta and (' · '..eta) or '')
-                slot.frame.Visible=true
+    -- Какие кандидаты сейчас за кадром (проверка каждый кадр, без задержки в 0.25 с).
+    local active={}
+    if prefs.arrows and camera then
+        for _,target in ipairs(arrowCandidates) do
+            if #active>=ARROW_SLOTS then break end
+            if target.part:IsDescendantOf(workspace) then
+                local _,onScreen=camera:WorldToViewportPoint(target.part.Position)
+                if not onScreen then table.insert(active,target) end
             end
         end
     end
+    -- Цель держит свой слот, пока остаётся за кадром: стрелки не перепрыгивают между слотами.
+    local assigned={}
+    for _,slot in ipairs(arrowSlots) do
+        local target
+        for _,candidate in ipairs(active) do
+            if candidate.object==slot.owner then target=candidate break end
+        end
+        if target then assigned[target.object]=true;slot.target=target
+        else slot.owner=nil;slot.target=nil end
+    end
+    for _,candidate in ipairs(active) do
+        if not assigned[candidate.object] then
+            for _,slot in ipairs(arrowSlots) do
+                if not slot.owner then
+                    slot.owner=candidate.object;slot.target=candidate;slot.angle=nil
+                    break
+                end
+            end
+        end
+    end
+    local width,height=root.AbsoluteSize.X,root.AbsoluteSize.Y
+    local radius=math.clamp(math.min(width,height)*0.34,70,170)
+    local anyShown=false
+    local flatRight=Vector3.new(0,0,0)
+    local cameraPosition=Vector3.new(0,0,0)
+    if camera then
+        local look=camera.CFrame.LookVector
+        local flat=Vector3.new(look.X,0,look.Z)
+        if flat.Magnitude>0.05 then lastFlat=flat.Unit end
+        flatRight=Vector3.new(-lastFlat.Z,0,lastFlat.X)
+        cameraPosition=camera.CFrame.Position
+    end
+    local blend=1-math.exp(-dt/0.07)
+    for _,slot in ipairs(arrowSlots) do
+        local target=slot.target
+        if target and camera then
+            local delta=target.part.Position-cameraPosition
+            local forwardD,rightD=delta:Dot(lastFlat),delta:Dot(flatRight)
+            -- Цель спереди: стрелка там, куда надо довернуть камеру (вверх/вниз/вбок).
+            -- Цель сзади: только азимут, чтобы «за спиной» всегда было внизу кольца.
+            local localPosition=camera.CFrame:PointToObjectSpace(target.part.Position)
+            local bearing
+            if localPosition.Z<-0.001 then bearing=math.atan2(localPosition.X,localPosition.Y)
+            else bearing=math.atan2(rightD,forwardD) end
+            if slot.angle then
+                local diff=(bearing-slot.angle+math.pi)%(2*math.pi)-math.pi
+                slot.angle=slot.angle+diff*blend
+            else slot.angle=bearing end
+            local a=slot.angle
+            slot.frame.Position=UDim2.fromOffset(width/2+math.sin(a)*radius,height/2-math.cos(a)*radius)
+            slot.arrow.Rotation=math.deg(a)
+            local isTop=prefs.threat and target.object==topThreat
+            local color=isTop and Theme.danger or (Theme.kind[target.kind] or Theme.warn)
+            slot.arrow.TextColor3=color
+            slot.chipStroke.Color=color
+            slot.arrow.TextSize=isTop and 25 or 19
+            slot.arrow.TextTransparency=isTop and 0 or math.clamp(target.range/math.max(distance,1),0,1)*0.45
+            -- Подпись внутри кольца, отодвинута от стрелки на свой размер.
+            local elevation=math.deg(math.atan2(delta.Y,math.sqrt(forwardD*forwardD+rightD*rightD)))
+            local vertical=elevation>12 and '↑ ' or (elevation<-12 and '↓ ' or '')
+            local info=threat[target.object]
+            local eta=prefs.showEta and info and etaText(info.tti)
+            slot.label.Text=vertical..string.format('%d м',math.floor(target.range*METERS_PER_STUD+0.5))..(eta and (' · '..eta) or '')
+            slot.chip.Visible=prefs.showDistance
+            local ux,uy=-math.sin(a),math.cos(a)
+            local chipSize=slot.chip.AbsoluteSize
+            local reach=14+math.abs(ux)*chipSize.X/2+math.abs(uy)*chipSize.Y/2+2
+            slot.chip.Position=UDim2.new(0.5,ux*reach,0.5,uy*reach)
+            slot.frame.Visible=true
+            anyShown=true
+        else
+            slot.frame.Visible=false
+        end
+    end
+    arrowRing.Size=UDim2.fromOffset(radius*2,radius*2)
+    arrowRing.Position=UDim2.fromOffset(width/2,height/2)
+    arrowRing.Visible=anyShown
 end))
 
 -- Store top-left positions as fractions of usable space; preserve them on rotation.
@@ -1649,10 +1771,11 @@ table.insert(connections,RunService.Heartbeat:Connect(function(dt)
     local nearby={}
     for _,object in ipairs(roster) do
         local part=targetPart(object)
-        if part then
+        local kind=part and displayKind(object)
+        if part and kind and (enabled[kind] or enabled.uav) then
             local delta=part.Position-originPart.Position
             local horizontal=math.sqrt(delta.X*delta.X+delta.Z*delta.Z)
-            if horizontal<=range then table.insert(nearby,{delta=delta,distance=horizontal,kind=classify(object) or 'uav'}) end
+            if horizontal<=range then table.insert(nearby,{delta=delta,distance=horizontal,kind=kind}) end
         end
     end
     table.sort(nearby,function(a,b)return a.distance<b.distance end)
