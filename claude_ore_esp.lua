@@ -2,6 +2,7 @@
 -- Ore ESP для режима "Мир шахтеров" (PlaceId 9404223526), инжектор Delta.
 -- Руды ловятся по тегу OreSparkle (ParticleEmitter с атрибутом Rarity), который ставит сама игра.
 -- Подсветка через стены (Highlight AlwaysOnTop) + трассеры от верхнего центра экрана.
+-- v1.1.0: фильтр по глубине (от/до), автопоиск ближайшей подходящей руды, индикатор глубины.
 
 if getgenv().OreESPLoaded then pcall(getgenv().OreESPUnload) end
 getgenv().OreESPLoaded = true
@@ -20,6 +21,7 @@ local guiParent = (gethui and gethui()) or CoreGui
 -- ===== НАСТРОЙКИ =====
 local RARITY_LIST = { 2, 3, 4, 5, 6 }   -- редкости, у которых игра ставит частицы
 local MIN_DIST, MAX_DIST = 25, 3000
+local DEPTH_MIN, DEPTH_MAX = -9500, 4000
 local MAX_HIGHLIGHTS = 25               -- лимит Roblox ~31 Highlight одновременно
 -- =====================
 
@@ -37,10 +39,31 @@ pcall(function()
     for k, v in pairs(gd.RarityColors) do
         if typeof(v) == "Color3" then rarityColors[k] = v end
     end
+    if type(gd.LowestDepth) == "number" then DEPTH_MIN = gd.LowestDepth end
 end)
 local function colorOf(r) return rarityColors[r] or DEFAULT_COLORS[r] or Color3.new(1, 1, 1) end
 
-local state = { espOn = true, maxDist = 400, enabled = {} }
+-- глубина = Y / 6 - 2000 - сдвиг мира (так игра сама ставит блоки)
+local BH
+pcall(function() BH = require(RS.Modules.BlockHandler) end)
+local function worldOffsetY()
+    if BH and BH.GetWorldOffset then
+        local ok, _, oy = pcall(BH.GetWorldOffset)
+        if ok and type(oy) == "number" then return oy end
+    end
+    return 0
+end
+local function depthFrom(y, oy) return y / 6 - 2000 - oy end
+
+local state = {
+    espOn = true,
+    autoOn = true,
+    depthOn = false,
+    maxDist = 400,
+    depthLo = DEPTH_MIN,
+    depthHi = DEPTH_MAX,
+    enabled = {},
+}
 for _, r in ipairs(RARITY_LIST) do state.enabled[r] = (r >= 5) end
 
 local hasDrawing = typeof(Drawing) ~= "nil"
@@ -103,69 +126,16 @@ local function ensureDrawings(e)
     end
 end
 
-local function render()
-    local char = lp.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    local origin = root and root.Position or cam.CFrame.Position
-    local top = Vector2.new(cam.ViewportSize.X / 2, 0)
-
-    local vis = {}
-    for em, e in pairs(tracked) do
-        local part = em.Parent
-        if part and part:IsA("BasePart") and state.espOn and state.enabled[e.rarity] then
-            local dist = (part.Position - origin).Magnitude
-            if dist <= state.maxDist then
-                table.insert(vis, { e = e, part = part, dist = dist })
-            else
-                hide(e)
-            end
-        else
-            hide(e)
-        end
-    end
-
-    table.sort(vis, function(a, b) return a.dist < b.dist end)
-
-    for i, v in ipairs(vis) do
-        local e, part = v.e, v.part
-        ensureDrawings(e)
-
-        if i <= MAX_HIGHLIGHTS then
-            local m = part.Parent
-            local target = (m and m:IsA("Model")) and m or part
-            if e.hl.Adornee ~= target then e.hl.Adornee = target end
-            e.hl.Enabled = true
-        else
-            e.hl.Enabled = false
-        end
-
-        if e.line then
-            local sp, onScreen = cam:WorldToViewportPoint(part.Position)
-            if onScreen and sp.Z > 0 then
-                e.line.From = top
-                e.line.To = Vector2.new(sp.X, sp.Y)
-                e.line.Visible = true
-                e.text.Position = Vector2.new(sp.X, sp.Y - 18)
-                e.text.Text = string.format("Редкость %d | %dм", e.rarity, v.dist)
-                e.text.Visible = true
-            else
-                e.line.Visible = false
-                e.text.Visible = false
-            end
-        end
-    end
-end
-
--- ===== МЕНЮ =====
+-- ===== МЕНЮ (создаём до render, render пишет в инфо-метки) =====
 local gui = Instance.new("ScreenGui")
 gui.Name = "OreESPMenu"
 gui.ResetOnSpawn = false
 gui.Parent = guiParent
 
-local fullH = 40 + (#RARITY_LIST + 1) * 32 + 110
+local fullH = 400
 local main = Instance.new("Frame")
 main.Size = UDim2.fromOffset(240, fullH)
-main.Position = UDim2.new(0, 20, 0.5, -150)
+main.Position = UDim2.new(0, 20, 0.5, -200)
 main.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
 main.BorderSizePixel = 0
 main.Active = true
@@ -227,71 +197,106 @@ local function makeToggle(text, y, color, default, cb)
     b.MouseButton1Click:Connect(function() on = not on; refresh(); cb(on) end)
 end
 
-makeToggle("ESP", 4, Color3.fromRGB(60, 160, 90), state.espOn, function(v) state.espOn = v end)
-for i, r in ipairs(RARITY_LIST) do
-    makeToggle("Редкость " .. r, 4 + i * 32, colorOf(r), state.enabled[r], function(v) state.enabled[r] = v end)
+local function makeLabel(y, text, size)
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, -20, 0, size or 20)
+    l.Position = UDim2.fromOffset(10, y)
+    l.BackgroundTransparency = 1
+    l.TextColor3 = Color3.new(1, 1, 1)
+    l.Font = Enum.Font.Gotham
+    l.TextSize = 13
+    l.TextWrapped = true
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.TextYAlignment = Enum.TextYAlignment.Top
+    l.Text = text
+    l.Parent = body
+    return l
 end
 
-local sliderY = 4 + (#RARITY_LIST + 1) * 32 + 6
-local distLabel = Instance.new("TextLabel")
-distLabel.Size = UDim2.new(1, -20, 0, 20)
-distLabel.Position = UDim2.fromOffset(10, sliderY)
-distLabel.BackgroundTransparency = 1
-distLabel.TextColor3 = Color3.new(1, 1, 1)
-distLabel.Font = Enum.Font.Gotham
-distLabel.TextSize = 14
-distLabel.TextXAlignment = Enum.TextXAlignment.Left
-distLabel.Parent = body
+local activeSlider = nil
+local function makeSlider(y, minV, maxV, init, fmt, onChange)
+    local lbl = makeLabel(y, "", 20)
+    lbl.TextSize = 14
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(1, -20, 0, 14)
+    bar.Position = UDim2.fromOffset(10, y + 24)
+    bar.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    bar.BorderSizePixel = 0
+    bar.Parent = body
+    Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 7)
+    local fill = Instance.new("Frame")
+    fill.BackgroundColor3 = Color3.fromRGB(70, 140, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bar
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 7)
 
-local bar = Instance.new("Frame")
-bar.Size = UDim2.new(1, -20, 0, 14)
-bar.Position = UDim2.fromOffset(10, sliderY + 28)
-bar.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-bar.BorderSizePixel = 0
-bar.Parent = body
-Instance.new("UICorner", bar).CornerRadius = UDim.new(0, 7)
-
-local fill = Instance.new("Frame")
-fill.BackgroundColor3 = Color3.fromRGB(70, 140, 255)
-fill.BorderSizePixel = 0
-fill.Parent = bar
-Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 7)
-
-local function setDist(d)
-    d = math.clamp(math.floor(d), MIN_DIST, MAX_DIST)
-    state.maxDist = d
-    distLabel.Text = "Дальность: " .. d .. " м"
-    fill.Size = UDim2.new((d - MIN_DIST) / (MAX_DIST - MIN_DIST), 0, 1, 0)
-end
-setDist(state.maxDist)
-
-local dragging = false
-local function fromInput(input)
-    local rel = (input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
-    setDist(MIN_DIST + math.clamp(rel, 0, 1) * (MAX_DIST - MIN_DIST))
-end
-bar.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = true
-        main.Draggable = false
-        fromInput(input)
+    local function set(v)
+        v = math.clamp(math.floor(v), minV, maxV)
+        lbl.Text = fmt(v)
+        fill.Size = UDim2.new((v - minV) / (maxV - minV), 0, 1, 0)
+        onChange(v)
     end
-end)
+    local function fromInput(input)
+        local rel = (input.Position.X - bar.AbsolutePosition.X) / bar.AbsoluteSize.X
+        set(minV + math.clamp(rel, 0, 1) * (maxV - minV))
+    end
+    bar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            activeSlider = fromInput
+            main.Draggable = false
+            fromInput(input)
+        end
+    end)
+    set(init)
+end
+
 local c3 = UIS.InputChanged:Connect(function(input)
-    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        fromInput(input)
+    if activeSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        activeSlider(input)
     end
 end)
 local c4 = UIS.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        dragging = false
+    if activeSlider and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+        activeSlider = nil
         main.Draggable = true
     end
 end)
 
+local y = 4
+makeToggle("ESP", y, Color3.fromRGB(60, 160, 90), state.espOn, function(v) state.espOn = v end)
+y = y + 32
+for _, r in ipairs(RARITY_LIST) do
+    makeToggle("Редкость " .. r, y, colorOf(r), state.enabled[r], function(v) state.enabled[r] = v end)
+    y = y + 32
+end
+
+y = y + 4
+makeSlider(y, MIN_DIST, MAX_DIST, state.maxDist,
+    function(v) return "Дальность: " .. v .. " м" end,
+    function(v) state.maxDist = v end)
+y = y + 46
+
+makeToggle("Фильтр по глубине", y, Color3.fromRGB(200, 120, 40), state.depthOn, function(v) state.depthOn = v end)
+y = y + 34
+makeSlider(y, DEPTH_MIN, DEPTH_MAX, state.depthLo,
+    function(v) return "Глубина от: " .. v end,
+    function(v) state.depthLo = v end)
+y = y + 46
+makeSlider(y, DEPTH_MIN, DEPTH_MAX, state.depthHi,
+    function(v) return "Глубина до: " .. v end,
+    function(v) state.depthHi = v end)
+y = y + 46
+
+makeToggle("Автопоиск ближайшей", y, Color3.fromRGB(60, 160, 90), state.autoOn, function(v) state.autoOn = v end)
+y = y + 34
+local infoDepth = makeLabel(y, "Ты на глубине: ...", 18)
+y = y + 20
+local infoNearest = makeLabel(y, "Ближайшая: ...", 34)
+y = y + 38
+
 local unloadBtn = Instance.new("TextButton")
 unloadBtn.Size = UDim2.new(1, -20, 0, 26)
-unloadBtn.Position = UDim2.fromOffset(10, sliderY + 52)
+unloadBtn.Position = UDim2.fromOffset(10, y)
 unloadBtn.BackgroundColor3 = Color3.fromRGB(150, 50, 50)
 unloadBtn.Text = "Выгрузить скрипт"
 unloadBtn.TextColor3 = Color3.new(1, 1, 1)
@@ -299,6 +304,88 @@ unloadBtn.Font = Enum.Font.Gotham
 unloadBtn.TextSize = 13
 unloadBtn.Parent = body
 Instance.new("UICorner", unloadBtn).CornerRadius = UDim.new(0, 6)
+y = y + 34
+
+fullH = y + 36
+main.Size = UDim2.fromOffset(240, fullH)
+main.Position = UDim2.new(0, 20, 0.5, -math.floor(fullH / 2))
+
+-- ===== РЕНДЕР =====
+local function render()
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local origin = root and root.Position or cam.CFrame.Position
+    local top = Vector2.new(cam.ViewportSize.X / 2, 0)
+    local oy = worldOffsetY()
+
+    infoDepth.Text = "Ты на глубине: " .. math.floor(depthFrom(origin.Y, oy))
+
+    local lo = math.min(state.depthLo, state.depthHi)
+    local hi = math.max(state.depthLo, state.depthHi)
+
+    local vis, best = {}, nil
+    for em, e in pairs(tracked) do
+        local shown = false
+        local part = em.Parent
+        if part and part:IsA("BasePart") and state.espOn and state.enabled[e.rarity] then
+            local pos = part.Position
+            local depth = depthFrom(pos.Y, oy)
+            if (not state.depthOn) or (depth >= lo and depth <= hi) then
+                local item = { e = e, part = part, dist = (pos - origin).Magnitude, depth = depth }
+                if not best or item.dist < best.dist then best = item end
+                if item.dist <= state.maxDist then
+                    table.insert(vis, item)
+                    shown = true
+                end
+            end
+        end
+        if not shown then hide(e) end
+    end
+
+    if best then
+        infoNearest.Text = string.format("Ближайшая: редкость %d, %d м, глубина %d",
+            best.e.rarity, math.floor(best.dist), math.floor(best.depth))
+        if state.autoOn and best.dist > state.maxDist then
+            table.insert(vis, best)
+        end
+    else
+        infoNearest.Text = "Ближайшая: нет в загруженной зоне"
+    end
+
+    table.sort(vis, function(a, b) return a.dist < b.dist end)
+
+    for i, v in ipairs(vis) do
+        local e, part = v.e, v.part
+        ensureDrawings(e)
+        local isBest = state.autoOn and v == best
+
+        if i <= MAX_HIGHLIGHTS then
+            local m = part.Parent
+            local target = (m and m:IsA("Model")) and m or part
+            if e.hl.Adornee ~= target then e.hl.Adornee = target end
+            e.hl.Enabled = true
+        else
+            e.hl.Enabled = false
+        end
+
+        if e.line then
+            local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+            if onScreen and sp.Z > 0 then
+                e.line.Thickness = isBest and 3 or 1.5
+                e.line.From = top
+                e.line.To = Vector2.new(sp.X, sp.Y)
+                e.line.Visible = true
+                e.text.Position = Vector2.new(sp.X, sp.Y - 18)
+                e.text.Text = string.format("%sР%d | %dм | гл.%d",
+                    isBest and "★ " or "", e.rarity, math.floor(v.dist), math.floor(v.depth))
+                e.text.Visible = true
+            else
+                e.line.Visible = false
+                e.text.Visible = false
+            end
+        end
+    end
+end
 
 -- ===== ЗАПУСК / ВЫГРУЗКА =====
 local renderConn = RunService.RenderStepped:Connect(render)
