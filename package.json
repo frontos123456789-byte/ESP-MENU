@@ -1,0 +1,11 @@
+{
+  "name": "pult",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Пульт — бесплатный AI-агрегатор с режимами Code, Work и Chat",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "node server.js",
+    "test": "node test/run.js"
+  }
+}

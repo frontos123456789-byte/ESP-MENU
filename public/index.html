@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru" data-theme="ink" data-mode="chat" data-accent="mode">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Пульт</title>
+  <meta name="description" content="Бесплатный AI-агрегатор: Code, Work и Chat на бесплатных моделях">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230d1220'/%3E%3Crect x='7' y='8' width='18' height='4' rx='2' fill='%23ff7a9c'/%3E%3Crect x='7' y='14' width='18' height='4' rx='2' fill='%23ffb547'/%3E%3Crect x='7' y='20' width='18' height='4' rx='2' fill='%233fd0b0'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Применяем тему до первой отрисовки, чтобы не мигало.
+    try {
+      var s = JSON.parse(localStorage.getItem('pult.settings.v1') || '{}');
+      var m = localStorage.getItem('pult.mode.v1');
+      var h = document.documentElement;
+      if (s.theme) h.dataset.theme = s.theme;
+      if (m) { m = JSON.parse(m); if (m) h.dataset.mode = m; }
+      if (s.accentMode === 'custom' && s.accentColor) { h.dataset.accent = 'custom'; h.style.setProperty('--accent', s.accentColor); }
+      if (s.fontSize) h.style.setProperty('--fs', s.fontSize + 'px');
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <div class="shell" id="shell">
+    <aside class="rail" id="rail" aria-label="Навигация">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="5" width="26" height="6" rx="3" fill="var(--a-chat)"/><rect x="3" y="13" width="26" height="6" rx="3" fill="var(--a-code)"/><rect x="3" y="21" width="26" height="6" rx="3" fill="var(--a-work)"/></svg>
+        <span class="brand-name">Пульт</span>
+      </div>
+
+      <div class="modes" id="modes" role="tablist" aria-label="Режим"></div>
+
+      <button class="btn-new" id="newChat" type="button">Новый чат</button>
+      <nav class="chat-list" id="chatList" aria-label="Чаты"></nav>
+
+      <div class="rail-foot">
+        <button type="button" class="foot-btn" id="openConnectors">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7V3m6 4V3M7 11h10v3a5 5 0 0 1-10 0v-3zm5 8v2"/></svg>
+          Коннекторы
+        </button>
+        <button type="button" class="foot-btn" id="openSettings">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+          Настройки
+        </button>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim"></div>
+
+    <main class="stage">
+      <header class="bar">
+        <button class="icon-btn menu-btn" id="menuBtn" type="button" aria-label="Открыть меню">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+        </button>
+        <h1 class="bar-title" id="chatTitle">Новый чат</h1>
+        <button type="button" class="model-btn" id="modelBtn" aria-haspopup="dialog">
+          <span class="model-dot" aria-hidden="true"></span>
+          <span id="modelName">Загружаю модели…</span>
+        </button>
+      </header>
+
+      <div class="thread-wrap" id="threadWrap">
+        <div class="thread" id="thread"></div>
+      </div>
+
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="chips" id="chips"></div>
+        <textarea id="input" rows="1" aria-label="Сообщение"></textarea>
+        <div class="composer-row">
+          <div class="tools">
+            <button type="button" class="tool-btn" id="attachBtn">Файл</button>
+            <button type="button" class="tool-btn" id="ctxBtn">Из коннектора</button>
+            <input type="file" id="fileInput" multiple hidden>
+          </div>
+          <div class="send-wrap">
+            <span class="hint" id="sendHint"></span>
+            <button type="submit" class="send" id="sendBtn">Отправить</button>
+          </div>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="modelDialog" aria-labelledby="modelDialogTitle">
+    <div class="dlg-head">
+      <h2 id="modelDialogTitle">Бесплатные модели</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="dlg-body">
+      <input type="search" id="modelSearch" class="input" placeholder="Поиск по названию" aria-label="Поиск модели">
+      <p class="help" id="modelNote"></p>
+      <div class="pick-list" id="modelList" role="listbox" aria-label="Модели"></div>
+    </div>
+  </dialog>
+
+  <dialog id="settingsDialog" class="wide" aria-labelledby="settingsTitle">
+    <div class="dlg-head">
+      <h2 id="settingsTitle">Настройки</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="tabs" id="settingsTabs" role="tablist"></div>
+    <div class="dlg-body" id="settingsBody"></div>
+  </dialog>
+
+  <dialog id="connectorsDialog" class="wide" aria-labelledby="connectorsTitle">
+    <div class="dlg-head">
+      <h2 id="connectorsTitle">Коннекторы</h2>
+      <button type="button" class="icon-btn" data-close aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="tabs" id="connectorTabs" role="tablist"></div>
+    <div class="dlg-body" id="connectorBody"></div>
+  </dialog>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
