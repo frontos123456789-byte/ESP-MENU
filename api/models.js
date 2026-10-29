@@ -13,10 +13,15 @@ const FALLBACK = [
   { id: 'google/gemma-3-27b-it:free', name: 'Gemma 3 27B', context: 131072 },
 ];
 
+// Только настоящие бесплатные чат-модели: id с :free (или роутер), нулевая цена,
+// без служебных (модерация, музыка, эмбеддинги), которые нулевую цену имеют, но чатом не являются.
+const NOT_CHAT = /content-safety|guard|moderation|lyria|embed|rerank/i;
+
 function isFree(m) {
   const p = m.pricing || {};
   const zero = (v) => v === 0 || v === '0' || Number(v) === 0;
-  return zero(p.prompt) && zero(p.completion) && p.prompt !== undefined;
+  const freeId = /:free$/.test(m.id) || m.id === 'openrouter/free';
+  return freeId && !NOT_CHAT.test(m.id) && zero(p.prompt) && zero(p.completion) && p.prompt !== undefined;
 }
 
 function textOutput(m) {
