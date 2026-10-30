@@ -15,7 +15,7 @@ const FALLBACK = [
 
 // Только настоящие бесплатные чат-модели: id с :free (или роутер), нулевая цена,
 // без служебных (модерация, музыка, эмбеддинги), которые нулевую цену имеют, но чатом не являются.
-const NOT_CHAT = /content-safety|guard|moderation|lyria|embed|rerank/i;
+const NOT_CHAT = /content-safety|guard|moderation|lyria|embed|rerank|inkling/i; // inkling: только для агентных оболочек, в обычном чате не работает
 
 function isFree(m) {
   const p = m.pricing || {};

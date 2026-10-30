@@ -187,7 +187,7 @@ export function rankModels(mode, models) {
     const i = prefer.findIndex((re) => re.test(m.id) || re.test(m.name));
     return i === -1 ? prefer.length : i;
   };
-  const rest = models.filter((m) => m.id !== chosen).sort((a, b) => score(a) - score(b) || b.context - a.context);
+  const rest = models.filter((m) => m.id !== chosen && !/inkling/i.test(m.id)).sort((a, b) => score(a) - score(b) || b.context - a.context);
   const pick = models.find((m) => m.id === chosen);
   return pick ? [pick, ...rest] : rest;
 }

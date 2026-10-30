@@ -114,5 +114,6 @@ export function explain(err) {
 
 export function isRetryable(err) {
   if (['nokey', 'badkey', 'access', 'notfree', 'credits', 'network'].includes(err.code)) return false;
-  return ['ratelimit', 'upstream', 'empty', 'stream'].includes(err.code) || [404, 408, 429, 502, 503, 504].includes(err.status);
+  if (/agentic|harness|not available|unavailable|no endpoints/i.test(err.message || '')) return true;
+  return ['ratelimit', 'upstream', 'empty', 'stream'].includes(err.code) || [400, 403, 404, 408, 422, 429, 502, 503, 504].includes(err.status);
 }
