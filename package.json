@@ -1,0 +1,12 @@
+{
+  "name": "shtab-ide",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Single-file browser IDE agent and AI workspace",
+  "scripts": {
+    "test": "node tests/browser.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}
