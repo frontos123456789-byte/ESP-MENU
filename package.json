@@ -4,7 +4,7 @@
   "private": true,
   "description": "Single-file browser IDE agent and AI workspace",
   "scripts": {
-    "test": "node tests/browser.cjs"
+    "test": "node tests/browser.cjs && node tests/latency.cjs"
   },
   "devDependencies": {
     "playwright": "1.62.1"
