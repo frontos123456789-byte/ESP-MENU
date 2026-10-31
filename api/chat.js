@@ -36,6 +36,10 @@ module.exports = handler(async (req, res) => {
   const payload = { model, messages: clean, stream: true };
   const t = Number(body.temperature);
   if (Number.isFinite(t) && t >= 0 && t <= 2) payload.temperature = t;
+  if (Array.isArray(body.stop)) {
+    const stop = body.stop.filter((x) => typeof x === 'string' && x && x.length <= 40).slice(0, 4);
+    if (stop.length) payload.stop = stop;
+  }
   const mt = Number(body.max_tokens);
   if (Number.isFinite(mt) && mt > 0 && mt <= 32000) payload.max_tokens = Math.floor(mt);
 

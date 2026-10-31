@@ -30,19 +30,32 @@ export async function getJson(url, headers = {}, signal) {
   return j;
 }
 
+export async function postJson(url, body, headers = {}) {
+  let r;
+  try {
+    r = await fetch(url, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json', ...headers }), body: JSON.stringify(body) });
+  } catch {
+    throw new ApiError('Нет связи с сервером', { code: 'network' });
+  }
+  let j = {};
+  try { j = await r.json(); } catch { /* пустой ответ */ }
+  if (!r.ok) throw new ApiError(j.error || `Ошибка ${r.status}`, { status: r.status, code: j.code || '' });
+  return j;
+}
+
 export function loadModels() {
   return getJson('/api/models');
 }
 
 // Читает SSE от /api/chat и отдаёт куски текста в onDelta.
-export async function streamChat({ model, messages, signal, onDelta }) {
+export async function streamChat({ model, messages, signal, onDelta, stop }) {
   let r;
   try {
     r = await fetch('/api/chat', {
       method: 'POST',
       signal,
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ model, messages, temperature: state.settings.temperature }),
+      body: JSON.stringify({ model, messages, temperature: state.settings.temperature, stop }),
     });
   } catch (e) {
     if (e.name === 'AbortError') throw e;
@@ -58,6 +71,7 @@ export async function streamChat({ model, messages, signal, onDelta }) {
   const dec = new TextDecoder();
   let buf = '';
   let got = false;
+  let finish = '';
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -70,11 +84,12 @@ export async function streamChat({ model, messages, signal, onDelta }) {
       const data = line.slice(5).trim();
       if (data === '[DONE]') {
         if (!got) throw new ApiError('Модель вернула пустой ответ', { code: 'empty' });
-        return;
+        return { finish };
       }
       let j;
       try { j = JSON.parse(data); } catch { continue; }
       if (j.error) throw new ApiError(j.error.message || 'Ошибка модели', { code: 'stream' });
+      if (j.choices?.[0]?.finish_reason) finish = j.choices[0].finish_reason;
       const piece = j.choices?.[0]?.delta?.content;
       if (piece) {
         got = true;
@@ -83,6 +98,7 @@ export async function streamChat({ model, messages, signal, onDelta }) {
     }
   }
   if (!got) throw new ApiError('Модель вернула пустой ответ', { code: 'empty' });
+  return { finish };
 }
 
 // Человеческое объяснение ошибки + что с этим делать.

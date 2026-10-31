@@ -1,6 +1,6 @@
 'use strict';
 
-const { send, fail, requireAccess, query, handler, cut } = require('./_lib');
+const { send, fail, readJson, requireAccess, query, handler, cut, cleanFiles } = require('./_lib');
 
 const API = () => (process.env.VERCEL_API_URL || 'https://api.vercel.com').replace(/\/+$/, '');
 
@@ -81,6 +81,40 @@ module.exports = handler(async (req, res) => {
       .reverse();
     const c = cut(lines.join('\n'), 30_000);
     return send(res, 200, { log: c.text, lines: lines.length, truncated: c.truncated });
+  }
+
+  if (op === 'deploy') {
+    if (req.method !== 'POST') throw fail(405, 'Только POST');
+    const body = await readJson(req);
+    const name = String(body.name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+    if (name.length < 2) throw fail(400, 'Нужно имя проекта латиницей (минимум 2 символа)');
+    const files = cleanFiles(body.files);
+    const u = new URL(API() + '/v13/deployments');
+    if (team) u.searchParams.set('teamId', team);
+    u.searchParams.set('skipAutoDetectionConfirmation', '1');
+    const r = await fetch(u, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'pult-app' },
+      body: JSON.stringify({
+        name,
+        target: 'production',
+        files: files.map((f) => ({ file: f.path, data: f.data, encoding: 'utf-8' })),
+        projectSettings: { framework: null },
+      }),
+      signal: AbortSignal.timeout(40000),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      if (r.status === 401 || r.status === 403) throw fail(401, 'Vercel не принял токен или нет прав на деплой.', 'badtoken');
+      if (r.status === 429) throw fail(429, 'Vercel ограничил запросы, попробуй позже.', 'vc_limit');
+      throw fail(r.status === 400 || r.status === 409 || r.status === 422 ? 400 : 502, `Vercel: ${j.error?.message || r.status}`);
+    }
+    return send(res, 200, {
+      id: j.id,
+      state: j.readyState || j.status || '',
+      url: j.url ? `https://${j.url}` : '',
+      productionUrl: `https://${j.name || name}.vercel.app`,
+    });
   }
 
   throw fail(400, 'Неизвестная операция');

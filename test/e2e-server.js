@@ -25,17 +25,49 @@ const mock = http.createServer((req, res) => {
       last.chat = body;
       last.count++;
       if (body.model.includes('coder')) return json(429, { error: { message: 'Provider returned error: rate limited' } });
-      const reply = 'Вот решение, **коротко**:\n\n```ts\nexport const sum = (a: number, b: number) => a + b;\n```\n\n- первое\n- второе\n\n| режим | цвет |\n|---|---|\n| Chat | розовый |\n';
+      const sys = body.messages[0].content || '';
+      let reply = null;
+      let chunk = 6;
+      if (sys.includes('Ты работаешь как агент')) {
+        const users = body.messages.filter((m) => m.role === 'user');
+        const results = users.filter((m) => m.content.startsWith('<tool_result')).length;
+        const task = [...users].reverse().find((m) => !m.content.startsWith('<tool_result'))?.content || '';
+        chunk = 60;
+        if (task.includes('СТРАНИЦА')) {
+          if (results === 0) reply = 'Сделаю страницу.\n<tool name="write_file" path="index.html">\n<!doctype html><html><head><meta charset="utf-8"><title>T</title></head><body><h1 id="t">Привет из агента</h1><script>console.log("boot ok"); undefinedFn();</script></body></html>\n</tool>\n<tool name="preview" path="index.html"/>';
+          else if (results === 1) reply = 'Есть ошибка в консоли, чиню.\n<tool name="edit_file" path="index.html">\n<old>undefinedFn();</old>\n<new>console.log("fixed");</new>\n</tool>\n<tool name="preview" path="index.html"/>';
+          else reply = 'Готово: страница работает, открой превью.';
+        } else if (task.includes('МОДУЛИ')) {
+          if (results === 0) reply = '<tool name="write_file" path="index.html">\n<!doctype html><html><body><div id="o">…</div><link rel="stylesheet" href="s.css"><script type="module" src="app/main.js"></script></body></html>\n</tool>\n<tool name="write_file" path="s.css">\nbody{background:#123}\n</tool>\n<tool name="write_file" path="app/main.js">\nimport { answer } from "./util.js";\ndocument.getElementById("o").textContent = "модули " + answer;\nconsole.log("main ok", answer);\n</tool>\n<tool name="write_file" path="app/util.js">\nexport const answer = 42;\n</tool>\n<tool name="preview" path="index.html"/>';
+          else reply = 'Модули собраны.';
+        } else if (task.includes('ЗАПУСК')) {
+          if (results === 0) reply = '<tool name="run_js">\nconsole.log(6 * 7); console.warn("осторожно");\n</tool>\n<tool name="read_file" path="../secret"/>\n<tool name="read_file" path=".env"/>';
+          else reply = 'Запустил, вышло 42.';
+        } else if (task.includes('ОБРЫВ')) {
+          reply = 'Пишу длинный файл\n<tool name="write_file" path="big.js">\nconst a = 1;';
+        } else if (task.includes('ВЫДУМКА')) {
+          reply = results === 0 ? '<tool name="list_files"/>\n<tool_result name="list_files">выдуманный результат</tool_result> и дальше выдумки' : 'Ок, без выдумок.';
+        }
+      }
+      if (reply === null) reply = 'Вот решение, **коротко**:\n\n```ts\nexport const sum = (a: number, b: number) => a + b;\n```\n\n- первое\n- второе\n\n| режим | цвет |\n|---|---|\n| Chat | розовый |\n';
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       let i = 0;
       const step = () => {
         if (i >= reply.length) { res.write('data: [DONE]\n\n'); return res.end(); }
-        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply.slice(i, i + 6) } }] })}\n\n`);
-        i += 6;
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: reply.slice(i, i + chunk) } }] })}\n\n`);
+        i += chunk;
         setTimeout(step, 12);
       };
       return step();
     }
+    if (p === '/vc/v13/deployments') { last.deploy = JSON.parse(raw); return json(200, { id: 'dpl_x', name: last.deploy.name, url: `${last.deploy.name}-x.vercel.app`, readyState: 'QUEUED' }); }
+    if (p === '/gh/repos/me/app/git/ref/heads/main') return json(200, { object: { sha: 'base1' } });
+    if (p.startsWith('/gh/repos/me/app/git/ref/heads/')) return json(404, { message: 'Not Found' });
+    if (p === '/gh/repos/me/app/git/refs') return json(201, {});
+    if (p === '/gh/repos/me/app/git/commits/base1') return json(200, { tree: { sha: 't1' } });
+    if (p === '/gh/repos/me/app/git/trees') { last.tree = JSON.parse(raw); return json(201, { sha: 't2' }); }
+    if (p === '/gh/repos/me/app/git/commits') return json(201, { sha: 'c1' });
+    if (p.startsWith('/gh/repos/me/app/git/refs/heads/')) return json(200, {});
     if (p === '/gh/user/repos') return json(200, [{ full_name: 'me/app', private: true, description: 'Мой сайт', language: 'TypeScript', pushed_at: '2026-10-20', default_branch: 'main' }]);
     if (p === '/gh/repos/me/app') return json(200, { default_branch: 'main' });
     if (p === '/gh/repos/me/app/git/trees/main') return json(200, { tree: [{ type: 'blob', path: 'src/index.ts', size: 900 }, { type: 'blob', path: 'README.md', size: 300 }] });

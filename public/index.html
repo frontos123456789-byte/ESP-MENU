@@ -35,6 +35,10 @@
       <nav class="chat-list" id="chatList" aria-label="Чаты"></nav>
 
       <div class="rail-foot">
+        <button type="button" class="foot-btn" id="openPalette">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5-5M5 12l5 5M12 19h7"/></svg>
+          Команды <kbd>Ctrl K</kbd>
+        </button>
         <button type="button" class="foot-btn" id="openConnectors">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7V3m6 4V3M7 11h10v3a5 5 0 0 1-10 0v-3zm5 8v2"/></svg>
           Коннекторы
@@ -53,6 +57,10 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
         </button>
         <h1 class="bar-title" id="chatTitle">Новый чат</h1>
+        <button type="button" class="panel-btn code-only" id="panelBtn" aria-pressed="false" title="Проект: файлы, превью, консоль (Ctrl+J)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v14H3zM14 5v14"/></svg>
+          <span>Проект</span>
+        </button>
         <button type="button" class="model-btn" id="modelBtn" aria-haspopup="dialog">
           <span class="model-dot" aria-hidden="true"></span>
           <span id="modelName">Загружаю модели…</span>
@@ -63,6 +71,8 @@
         <div class="thread" id="thread"></div>
       </div>
 
+      <div class="approval" id="approval" hidden></div>
+
       <form class="composer" id="composer" autocomplete="off">
         <div class="chips" id="chips"></div>
         <textarea id="input" rows="1" aria-label="Сообщение"></textarea>
@@ -70,6 +80,8 @@
           <div class="tools">
             <button type="button" class="tool-btn" id="attachBtn">Файл</button>
             <button type="button" class="tool-btn" id="ctxBtn">Из коннектора</button>
+            <button type="button" class="tool-btn code-only" id="agentBtn" aria-pressed="true" title="Агент сам читает и правит файлы проекта">Агент</button>
+            <button type="button" class="tool-btn code-only" id="planBtn" aria-pressed="false" title="Сначала план, без правок">План</button>
             <input type="file" id="fileInput" multiple hidden>
           </div>
           <div class="send-wrap">
@@ -79,9 +91,23 @@
         </div>
       </form>
     </main>
+
+    <aside class="panel" id="panel" aria-label="Проект" aria-hidden="true">
+      <div class="panel-resize" id="panelResize" role="separator" aria-orientation="vertical" title="Потяни, чтобы изменить ширину"></div>
+      <div class="panel-head">
+        <div class="ptabs" id="ptabs" role="tablist"></div>
+        <button class="icon-btn" id="panelClose" type="button" aria-label="Закрыть панель"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="panel-body" id="pbody"></div>
+    </aside>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <dialog id="palette" class="palette" aria-label="Команды">
+    <input id="paletteInput" class="input" type="text" placeholder="Что сделать? Начни печатать…" autocomplete="off" spellcheck="false" aria-label="Команда">
+    <div class="plist" id="paletteList" role="listbox"></div>
+  </dialog>
 
   <dialog id="modelDialog" aria-labelledby="modelDialogTitle">
     <div class="dlg-head">

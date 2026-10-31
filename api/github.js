@@ -1,6 +1,6 @@
 'use strict';
 
-const { send, fail, requireAccess, query, handler, cut } = require('./_lib');
+const { send, fail, readJson, requireAccess, query, handler, cut, cleanFiles } = require('./_lib');
 
 const API = () => (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
 const MAX_FILE = 60_000;
@@ -26,6 +26,28 @@ async function gh(path, token, accept) {
   return r;
 }
 
+async function ghw(method, path, token, body) {
+  const r = await fetch(`${API()}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'pult-app',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(20000),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    if (r.status === 401) throw fail(401, 'GitHub не принял токен.', 'badtoken');
+    if (r.status === 403 || r.status === 404) throw fail(403, 'У токена нет прав на запись в этот репозиторий (нужен доступ Contents: write).', 'gh_write');
+    throw Object.assign(fail(r.status === 422 ? 422 : 502, `GitHub: ${j.message || r.status}`), { upstream: r.status });
+  }
+  return j;
+}
+
 function parseRepo(v) {
   if (typeof v !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(v)) throw fail(400, 'Некорректное имя репозитория');
   return v;
@@ -43,6 +65,35 @@ module.exports = handler(async (req, res) => {
 
   const q = query(req);
   const op = q.get('op');
+
+  if (op === 'commit') {
+    if (req.method !== 'POST') throw fail(405, 'Только POST');
+    const body = await readJson(req);
+    const repo = parseRepo(body.repo);
+    const files = cleanFiles(body.files);
+    const message = String(body.message || 'Обновление из Пульта').slice(0, 200);
+    const info = await (await gh(`/repos/${repo}`, token)).json();
+    const base = info.default_branch || 'main';
+    let branch = String(body.branch || '').trim();
+    if (branch && !/^[\w./-]{1,80}$/.test(branch)) throw fail(400, 'Некорректное имя ветки');
+    if (!branch) branch = `pult-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`;
+
+    let head = null;
+    try { head = (await ghw('GET', `/repos/${repo}/git/ref/heads/${branch}`, token)).object.sha; } catch { /* ветки ещё нет */ }
+    if (!head) {
+      const baseSha = (await ghw('GET', `/repos/${repo}/git/ref/heads/${base}`, token)).object.sha;
+      await ghw('POST', `/repos/${repo}/git/refs`, token, { ref: `refs/heads/${branch}`, sha: baseSha });
+      head = baseSha;
+    }
+    const baseTree = (await ghw('GET', `/repos/${repo}/git/commits/${head}`, token)).tree.sha;
+    const tree = await ghw('POST', `/repos/${repo}/git/trees`, token, {
+      base_tree: baseTree,
+      tree: files.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.data })),
+    });
+    const commit = await ghw('POST', `/repos/${repo}/git/commits`, token, { message, tree: tree.sha, parents: [head] });
+    await ghw('PATCH', `/repos/${repo}/git/refs/heads/${branch}`, token, { sha: commit.sha });
+    return send(res, 200, { branch, base, sha: commit.sha, url: `https://github.com/${repo}/tree/${branch}`, compare: `https://github.com/${repo}/compare/${base}...${branch}`, files: files.length });
+  }
 
   if (op === 'repos') {
     const r = await gh('/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member', token);

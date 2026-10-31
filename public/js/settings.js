@@ -6,6 +6,7 @@ const TABS = [
   ['look', 'Вид'],
   ['prompts', 'Промты'],
   ['models', 'Модели'],
+  ['agent', 'Агент'],
   ['access', 'Доступ'],
   ['data', 'Данные'],
 ];
@@ -29,7 +30,7 @@ function render() {
     )
   );
   const body = document.getElementById('settingsBody');
-  body.replaceChildren(({ look, prompts, models, access, data })[current](body));
+  body.replaceChildren(({ look, prompts, models, agent, access, data })[current](body));
   body.scrollTop = 0;
 }
 
@@ -173,6 +174,36 @@ function models() {
     wrap.append(field(`Модель по умолчанию: ${m.label}`, sel));
   }
   wrap.append(el('p', { class: 'help' }, 'Список бесплатных моделей берётся у OpenRouter и обновляется сам.'));
+  return wrap;
+}
+
+/* ---------------- Агент ---------------- */
+function agent() {
+  const a = state.settings.agent;
+  const wrap = el('div');
+  const sw = (label, help, key) => {
+    const input = el('input', { type: 'checkbox', 'aria-label': label });
+    input.checked = a[key];
+    input.addEventListener('change', () => { a[key] = input.checked; save(); ctx.refresh(); });
+    return el('label', { class: 'switch' }, el('span', {}, el('span', { class: 'lbl' }, label), el('p', { class: 'help' }, help)), input);
+  };
+  wrap.append(sw('Агент в режиме Code', 'Модель сама читает, создаёт и правит файлы проекта, запускает код и проверяет превью. Выключишь, и Code станет обычным чатом.', 'on'));
+  wrap.append(sw('Читать правила проекта', 'Если в проекте есть AGENTS.md, CLAUDE.md или .pultrules, их текст добавляется в инструкции агента.', 'rules'));
+  wrap.append(sw('Режим плана', 'Агент сначала предлагает план и ничего не меняет, пока ты не ответишь.', 'plan'));
+
+  const sel = el('select', { 'aria-label': 'Подтверждение правок' },
+    el('option', { value: 'smart' }, 'Умно: спрашивать только при записи в папку на компьютере'),
+    el('option', { value: 'ask' }, 'Всегда спрашивать перед правкой'),
+    el('option', { value: 'auto' }, 'Не спрашивать, всё можно откатить в «Правках»'));
+  sel.value = a.confirm;
+  sel.addEventListener('change', () => { a.confirm = sel.value; save(); });
+  wrap.append(field('Подтверждение правок', sel, 'В песочнице браузера ничего не страшно, поэтому умный режим применяет правки сразу. Настоящие файлы он защищает вопросом с диффом.'));
+
+  const steps = el('input', { type: 'range', min: '4', max: '30', step: '1', value: String(a.steps), 'aria-label': 'Максимум шагов' });
+  const out = el('span', { class: 'help' }, String(a.steps));
+  steps.addEventListener('input', () => { a.steps = Number(steps.value); out.textContent = String(a.steps); save(); });
+  wrap.append(field('Максимум шагов за запрос', el('div', { class: 'row' }, steps, out), 'Шаг — одна реплика модели с вызовами инструментов. Больше шагов, больше расход бесплатного лимита.'));
+  wrap.append(el('p', { class: 'help' }, 'Ключи и токены агент не видит: файлы .env и подобные для него закрыты. Код запускается в изолированной песочнице без доступа к настройкам Пульта.'));
   return wrap;
 }
 

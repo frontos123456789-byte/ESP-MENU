@@ -1,5 +1,5 @@
 import {
-  state, saveSettings, saveChats, MODES, setMode, chatsFor, getChat, createChat, deleteChat, systemPrompt, rankModels, uid,
+  state, saveSettings, saveChats, MODES, THEMES, setMode, chatsFor, getChat, createChat, deleteChat, systemPrompt, rankModels, uid,
 } from './store.js';
 import { renderMarkdown, titleFrom } from './md.js';
 import { el, icon, ICONS, toast, copyText } from './ui.js';
@@ -7,18 +7,29 @@ import { loadModels, streamChat, explain, isRetryable } from './api.js';
 import { applyAppearance } from './appearance.js';
 import { openSettings } from './settings.js';
 import { openConnectors } from './connectors.js';
+import * as W from './workspace.js';
+import * as S from './sandbox.js';
+import * as P from './panel.js';
+import { openPalette, initPalette } from './palette.js';
+import {
+  agentSystem, loadRules, parseCalls, stripCalls, liveTool, cutHallucination, execTool, resultBlock,
+  compactAssistant, compactResult, TOOL_LABELS, MAX_CALLS_PER_TURN,
+} from './agent.js';
 
 const $ = (id) => document.getElementById(id);
 const HISTORY_BUDGET = 60000; // символов контекста; старые реплики отбрасываются
 const MAX_ATTACH = 8;
+const KEEP_FULL = 8; // сколько последних реплик агента не сжимать
 
 let models = [];
 let serverInfo = { serverKey: false, gated: false, fallback: false };
-let running = null; // { controller, chatId, msgId }
+let running = null; // { controller, chatId, msgId, phase }
 const pending = []; // вложения, ещё не отправленные
+const autoApprove = new Set(); // id чатов, где разрешено «применять всё»
 
 const activeChat = () => (state.activeId ? getChat(state.activeId) : null);
 const fineCursor = () => matchMedia('(pointer: fine)').matches;
+const agentOn = (mode = state.mode) => mode === 'code' && state.settings.agent.on;
 
 /* ================= рендер ================= */
 
@@ -69,6 +80,11 @@ function updateComposer() {
   $('input').placeholder = MODES[state.mode].placeholder;
   const send = state.settings.enterToSend && fineCursor();
   $('sendHint').textContent = send ? 'Enter — отправить, Shift+Enter — перенос' : fineCursor() ? 'Ctrl+Enter — отправить' : '';
+  const a = state.settings.agent;
+  $('agentBtn').setAttribute('aria-pressed', String(a.on));
+  $('planBtn').setAttribute('aria-pressed', String(a.plan));
+  $('planBtn').disabled = !a.on;
+  $('panelBtn').setAttribute('aria-pressed', String(P.isOpen()));
 }
 
 function setSendState() {
@@ -116,7 +132,10 @@ function setupNote() {
 
 function emptyState() {
   const m = MODES[state.mode];
-  const box = el('div', { class: 'empty' }, el('h2', { class: 'mode-word' }, m.label), el('p', { class: 'empty-lead' }, `${m.hint}. Бесплатные модели, твои промты, твой дизайн.`));
+  const lead = state.mode === 'code' && state.settings.agent.on
+    ? 'Агент сам пишет файлы, правит их и проверяет результат в превью. Бесплатные модели, твой дизайн.'
+    : `${m.hint}. Бесплатные модели, твои промты, твой дизайн.`;
+  const box = el('div', { class: 'empty' }, el('h2', { class: 'mode-word' }, m.label), el('p', { class: 'empty-lead' }, lead));
   const note = setupNote();
   if (note) box.append(note);
   box.append(
@@ -126,7 +145,13 @@ function emptyState() {
     )
   );
   if (state.mode === 'code') {
-    box.append(el('p', { class: 'help', style: 'margin-top:18px' }, el('button', { class: 'link-btn', type: 'button', onclick: () => openConnectors(connectorCtx) }, 'Добавить файлы из GitHub или лог сборки из Vercel')));
+    const n = W.ws.index.length;
+    box.append(
+      el('p', { class: 'help', style: 'margin-top:18px' },
+        el('button', { class: 'link-btn', type: 'button', onclick: () => P.openPanel('files') }, `Проект «${W.ws.name}»: ${n ? `${n} файл.` : 'пока пусто'}`),
+        ' · ',
+        el('button', { class: 'link-btn', type: 'button', onclick: () => openConnectors(connectorCtx) }, 'Файлы из GitHub или лог Vercel'))
+    );
   }
   return box;
 }
@@ -139,30 +164,70 @@ function errNote(err) {
   return box;
 }
 
+const shownText = (m) => (m.agent ? stripCalls(m.text || '') : m.text || '');
+
+const STEP_MARK = { run: '', ok: '✓', err: '!', rejected: '×' };
+
+function stepsEl(m) {
+  return el(
+    'div', { class: 'steps' },
+    ...m.steps.map((s) =>
+      el(
+        'button',
+        { class: `step ${s.status}`, type: 'button', title: s.note || '', onclick: () => stepClick(s) },
+        el('span', { class: 'si' }, STEP_MARK[s.status] ?? ''),
+        el('span', { class: 'sl' }, s.label || TOOL_LABELS[s.name] || s.name),
+        s.add != null ? el('span', { class: 'stat' }, el('b', { class: 'plus' }, `+${s.add}`), ' ', el('b', { class: 'minus' }, `−${s.del}`)) : null,
+        s.note && s.status !== 'run' ? el('small', {}, s.note) : null
+      )
+    )
+  );
+}
+
+function stepClick(s) {
+  if (s.changeId && W.ws.history.some((h) => h.id === s.changeId)) return P.focusChange(s.changeId);
+  if (s.name === 'preview') return P.openPanel('preview');
+  if (s.name === 'run_js') return P.openPanel('console');
+  if (s.path && W.exists(s.path) && ['read_file', 'write_file', 'edit_file'].includes(s.name)) return P.showFile(s.path);
+  P.openPanel('files');
+}
+
 function msgEl(m, chat) {
+  if (m.hidden) return null;
   if (m.role === 'user') {
     const node = el('article', { class: 'msg user', dataset: { id: m.id } }, el('div', { class: 'bubble' }, m.text || '(без текста)'));
     if (m.atts?.length) node.append(el('div', { class: 'msg-atts' }, ...m.atts.map((a) => el('span', { class: 'chip-ro', title: a.name }, shortName(a.name)))));
     return node;
   }
-  const live = running && running.msgId === m.id;
-  const node = el('article', { class: 'msg assistant' + (live ? ' streaming' : ''), dataset: { id: m.id } });
+  const streaming = running && running.msgId === m.id && running.phase === 'stream';
+  const working = running && running.msgId === m.id && running.phase === 'tools';
+  const node = el('article', { class: 'msg assistant' + (streaming ? ' streaming' : '') + (working ? ' working' : ''), dataset: { id: m.id } });
   node.append(el('div', { class: 'meta' }, el('span', { class: 'who' }, m.model || 'Модель'), m.note ? el('span', { class: 'note' }, m.note) : null));
-  const prose = el('div', { class: 'prose' });
-  prose.innerHTML = renderMarkdown(m.text || '');
-  node.append(prose);
+  const txt = shownText(m);
+  if (txt || streaming || !m.steps?.length) {
+    const prose = el('div', { class: 'prose' });
+    prose.innerHTML = renderMarkdown(txt);
+    node.append(prose);
+  }
+  if (streaming) node.append(el('div', { class: 'live-slot' }));
+  if (m.steps?.length) node.append(stepsEl(m));
   if (m.error) node.append(errNote(m.error));
-  if (!live) {
-    const last = chat.messages[chat.messages.length - 1] === m;
+  if (!streaming && !working) {
+    const last = lastVisible(chat) === m;
     node.append(
       el(
         'div', { class: 'actions' },
-        m.text ? el('button', { class: 'act', type: 'button', dataset: { act: 'copy' } }, 'Копировать') : null,
+        txt ? el('button', { class: 'act', type: 'button', dataset: { act: 'copy' } }, 'Копировать') : null,
         last ? el('button', { class: 'act', type: 'button', dataset: { act: 'retry' } }, 'Ещё раз') : null
       )
     );
   }
   return node;
+}
+
+function lastVisible(chat) {
+  for (let i = chat.messages.length - 1; i >= 0; i--) if (!chat.messages[i].hidden) return chat.messages[i];
+  return null;
 }
 
 function renderThread() {
@@ -174,7 +239,10 @@ function renderThread() {
     $('threadWrap').scrollTop = 0;
     return;
   }
-  for (const m of chat.messages) t.append(msgEl(m, chat));
+  for (const m of chat.messages) {
+    const n = msgEl(m, chat);
+    if (n) t.append(n);
+  }
   const w = $('threadWrap');
   w.scrollTop = w.scrollHeight;
 }
@@ -199,11 +267,17 @@ function paintStream(msg) {
   paintQueued = true;
   requestAnimationFrame(() => {
     paintQueued = false;
-    const prose = $('thread').querySelector(`[data-id="${msg.id}"] .prose`);
+    const node = $('thread').querySelector(`[data-id="${msg.id}"]`);
+    const prose = node?.querySelector('.prose');
     if (!prose) return;
     const w = $('threadWrap');
     const stick = w.scrollHeight - w.scrollTop - w.clientHeight < 160;
-    prose.innerHTML = renderMarkdown(msg.text);
+    prose.innerHTML = renderMarkdown(shownText(msg));
+    const slot = node.querySelector('.live-slot');
+    if (slot) {
+      const lt = msg.agent ? liveTool(msg.text) : null;
+      slot.textContent = lt ? `${TOOL_LABELS[lt.name] || lt.name}${lt.path ? ' ' + lt.path : ''}… ${lt.chars.toLocaleString('ru')} символов` : '';
+    }
     if (stick) w.scrollTop = w.scrollHeight;
   });
 }
@@ -212,8 +286,11 @@ function replaceMsg(msg, chat) {
   if (state.activeId !== chat.id) return;
   const node = $('thread').querySelector(`[data-id="${msg.id}"]`);
   if (!node) return;
-  if (chat.messages.includes(msg)) node.replaceWith(msgEl(msg, chat));
-  else node.remove();
+  if (!chat.messages.includes(msg)) return node.remove();
+  const next = msgEl(msg, chat);
+  if (next) node.replaceWith(next);
+  const w = $('threadWrap');
+  if (w.scrollHeight - w.scrollTop - w.clientHeight < 200) w.scrollTop = w.scrollHeight;
 }
 
 function toContent(m) {
@@ -224,12 +301,20 @@ function toContent(m) {
   return `${files}\n\n${m.text || 'Посмотри вложения.'}`;
 }
 
-function buildMessages(chat, endIdx) {
-  const sys = systemPrompt(chat.mode);
-  const hist = chat.messages
-    .slice(0, endIdx)
-    .filter((m) => m.role === 'user' || m.text.trim())
-    .map((m) => ({ role: m.role, content: toContent(m) }));
+async function buildMessages(chat, endIdx, agent) {
+  let sys = systemPrompt(chat.mode);
+  if (agent) {
+    const rules = state.settings.agent.rules ? await loadRules() : null;
+    sys = agentSystem({ base: sys, rules, plan: state.settings.agent.plan, tree: W.treeText(150), projectName: W.ws.name, kind: W.ws.kind });
+  }
+  const slice = chat.messages.slice(0, endIdx).filter((m) => m.role === 'user' || (m.text || '').trim());
+  const hist = slice.map((m, i) => {
+    const old = i < slice.length - KEEP_FULL;
+    let content = toContent(m);
+    if (old && m.role === 'assistant' && m.agent) content = compactAssistant(content);
+    if (old && m.hidden) content = compactResult(content);
+    return { role: m.role, content };
+  });
   let total = sys.length;
   const kept = [];
   for (let i = hist.length - 1; i >= 0; i--) {
@@ -242,25 +327,31 @@ function buildMessages(chat, endIdx) {
   return [{ role: 'system', content: sys }, ...kept];
 }
 
-async function complete(chat) {
-  const msg = { id: uid(), role: 'assistant', text: '', model: '', ts: Date.now() };
+// Одна реплика модели со стримингом и переключением на запасные модели.
+async function streamReply(chat, controller, { agent = false } = {}) {
+  const msg = { id: uid(), role: 'assistant', text: '', model: '', ts: Date.now(), agent };
   chat.messages.push(msg);
   chat.updated = Date.now();
-  const controller = new AbortController();
-  running = { controller, chatId: chat.id, msgId: msg.id };
+  running.msgId = msg.id;
+  running.phase = 'stream';
   saveChats(true);
   renderChatList();
   renderTitle();
   renderThread();
   setSendState();
 
-  const history = buildMessages(chat, chat.messages.length - 1);
-  const ranked = rankModels(chat.mode, models);
+  const history = await buildMessages(chat, chat.messages.length - 1, agent);
+  let ranked = rankModels(chat.mode, models);
+  // Модель, которая уже ответила в этом запуске, идёт первой: не мучаем снова ту, что падала.
+  const pi = running.pref ? ranked.findIndex((x) => x.id === running.pref) : -1;
+  if (pi > 0) ranked = [ranked[pi], ...ranked.filter((_, j) => j !== pi)];
   const tries = ranked.length
     ? ranked.slice(0, state.settings.autoSwitch ? 4 : 1)
     : [{ id: state.settings.models[chat.mode] || 'openrouter/free', name: 'Авто' }];
 
   let lastErr = null;
+  let aborted = false;
+  let finish = '';
   for (let i = 0; i < tries.length; i++) {
     const m = tries[i];
     msg.model = m.name;
@@ -269,11 +360,20 @@ async function complete(chat) {
     msg.note = i ? 'другая модель после сбоя' : '';
     replaceMsg(msg, chat);
     try {
-      await streamChat({ model: m.id, messages: history, signal: controller.signal, onDelta: (d) => { msg.text += d; paintStream(msg); } });
+      const r = await streamChat({
+        model: m.id,
+        messages: history,
+        signal: controller.signal,
+        stop: agent ? ['<tool_result'] : undefined,
+        onDelta: (d) => { msg.text += d; paintStream(msg); },
+      });
+      finish = r?.finish || '';
+      running.pref = m.id;
       lastErr = null;
       break;
     } catch (e) {
       if (e.name === 'AbortError') {
+        aborted = true;
         lastErr = null;
         if (msg.text) msg.note = msg.note ? `${msg.note} · остановлено` : 'остановлено';
         break;
@@ -283,14 +383,163 @@ async function complete(chat) {
     }
   }
   if (lastErr) msg.error = { message: lastErr.message, code: lastErr.code, status: lastErr.status };
+  if (agent) msg.text = cutHallucination(msg.text);
   if (!msg.text && !msg.error) chat.messages = chat.messages.filter((x) => x !== msg);
+  return { msg, aborted, finish, failed: Boolean(lastErr) };
+}
 
-  running = null;
-  chat.updated = Date.now();
-  saveChats(true);
-  replaceMsg(msg, chat);
-  setSendState();
-  renderChatList();
+async function complete(chat) {
+  const controller = new AbortController();
+  running = { controller, chatId: chat.id, msgId: null, phase: 'stream' };
+  let last = null;
+  try {
+    if (agentOn(chat.mode)) last = await runAgent(chat, controller);
+    else last = (await streamReply(chat, controller)).msg;
+  } catch (e) {
+    console.error(e);
+    toast('Что-то сломалось внутри: ' + (e.message || 'неизвестная ошибка'));
+  } finally {
+    hideApproval();
+    running = null;
+    chat.updated = Date.now();
+    saveChats(true);
+    setSendState();
+    renderChatList();
+    if (state.activeId === chat.id) {
+      if (last) replaceMsg(last, chat);
+      // сообщения без стрима перерисуем целиком, чтобы убрать индикаторы работы
+      renderThread();
+    }
+  }
+}
+
+/* ================= агент ================= */
+
+const WRITERS = new Set(['write_file', 'edit_file', 'delete_file']);
+
+function needConfirm(chat) {
+  const mode = state.settings.agent.confirm;
+  if (autoApprove.has(chat.id)) return false;
+  return mode === 'ask' || (mode === 'smart' && W.ws.kind === 'fs');
+}
+
+function toolCtx(chat, controller) {
+  return {
+    signal: controller.signal,
+    confirm: (change) => (needConfirm(chat) ? askApproval(chat, change, controller) : Promise.resolve(true)),
+    runJs: (code) => S.runJs(code),
+    preview: (path) => P.checkPreview(path),
+  };
+}
+
+async function runAgent(chat, controller) {
+  const max = Math.max(2, Math.min(40, Number(state.settings.agent.steps) || 14));
+  const ctx = toolCtx(chat, controller);
+  let last = null;
+  let step = 0;
+  for (; step < max; step++) {
+    const r = await streamReply(chat, controller, { agent: true });
+    const msg = r.msg;
+    last = msg;
+    if (r.aborted || r.failed || !chat.messages.includes(msg)) break;
+
+    const { calls, truncated } = parseCalls(msg.text);
+    if (!calls.length && !truncated) break;
+
+    running.phase = 'tools';
+    msg.steps = [];
+    replaceMsg(msg, chat);
+    const blocks = [];
+    const usedPreview = calls.some((c) => c.name === 'preview');
+    const todo = calls.slice(0, MAX_CALLS_PER_TURN);
+
+    for (const call of todo) {
+      if (controller.signal.aborted) break;
+      const st = { name: call.name, path: call.attrs.path || '', label: `${TOOL_LABELS[call.name]} ${call.attrs.path || ''}`.trim(), status: 'run' };
+      msg.steps.push(st);
+      replaceMsg(msg, chat);
+
+      let res;
+      if (state.settings.agent.plan && WRITERS.has(call.name)) {
+        res = { ok: false, output: 'Сейчас режим плана: менять файлы нельзя. Предложи план текстом и дождись ответа пользователя.', step: { ...st, status: 'err', note: 'режим плана' } };
+      } else {
+        res = await execTool(call, ctx);
+      }
+      Object.assign(st, res.step);
+      blocks.push(resultBlock(call, res));
+
+      if (res.ok && !usedPreview && WRITERS.has(call.name) && /\.html?$/i.test(st.path)) {
+        if (!P.isOpen() || P.previewing() === st.path || !P.previewing()) P.previewFile(st.path);
+      } else if (res.ok && call.name === 'write_file' && !P.isOpen()) {
+        P.openPanel('files');
+      }
+      replaceMsg(msg, chat);
+    }
+    if (calls.length > todo.length) blocks.push(`Выполнено только ${todo.length} из ${calls.length} вызовов (лимит за один ход). Остальные повтори следующим ходом.`);
+    if (truncated) {
+      blocks.push(
+        `<tool_result name="${truncated.name}" ok="false">\nТвой ответ оборвался по длине на блоке ${truncated.name}, файл НЕ записан. Пиши файл короче или по частям: сначала каркас через write_file, потом дополняй через edit_file.\n</tool_result>`
+      );
+    }
+    if (controller.signal.aborted) {
+      msg.note = msg.note ? `${msg.note} · остановлено` : 'остановлено';
+      msg.steps.forEach((s) => { if (s.status === 'run') { s.status = 'err'; s.note = 'остановлено'; } });
+      break;
+    }
+    chat.messages.push({
+      id: uid(), role: 'user', hidden: true, ts: Date.now(),
+      text: `${blocks.join('\n\n')}\n\nПродолжай. Если задача выполнена, ответь коротким итогом без вызовов инструментов.`,
+    });
+    saveChats(true);
+    if (!chat.messages.includes(msg)) break;
+  }
+  if (step >= max && last) {
+    last.note = last.note ? `${last.note} · лимит шагов` : 'лимит шагов, напиши «продолжай»';
+  }
+  return last;
+}
+
+/* ---------- согласование правок ---------- */
+
+let approvalCleanup = null;
+
+function hideApproval() {
+  approvalCleanup?.();
+  approvalCleanup = null;
+  const box = $('approval');
+  box.hidden = true;
+  box.replaceChildren();
+}
+
+function askApproval(chat, change, controller) {
+  return new Promise((resolve) => {
+    hideApproval();
+    const box = $('approval');
+    const verb = change.kind === 'create' ? 'создать' : change.kind === 'delete' ? 'удалить' : 'изменить';
+    const done = (v) => {
+      hideApproval();
+      resolve(v);
+    };
+    const onAbort = () => done(false);
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+    approvalCleanup = () => controller.signal.removeEventListener('abort', onAbort);
+
+    const small = change.stats.add + change.stats.del <= 40;
+    const diff = el('details', { class: 'ap-diff', open: small || undefined }, el('summary', {}, 'Показать изменения'), P.renderDiff(change.ops));
+    box.replaceChildren(
+      el('div', { class: 'ap-head' },
+        el('span', {}, `Агент хочет ${verb} `, el('code', {}, change.path)),
+        el('span', { class: 'stat' }, el('b', { class: 'plus' }, `+${change.stats.add}`), ' ', el('b', { class: 'minus' }, `−${change.stats.del}`))),
+      diff,
+      el('div', { class: 'ap-btns' },
+        el('button', { class: 'btn', type: 'button', onclick: () => done(false) }, 'Отклонить'),
+        el('button', { class: 'btn', type: 'button', onclick: () => { autoApprove.add(chat.id); done(true); } }, 'Применять всё в этом чате'),
+        el('button', { class: 'btn primary', type: 'button', onclick: () => done(true) }, 'Применить'))
+    );
+    box.hidden = false;
+    const w = $('threadWrap');
+    w.scrollTop = w.scrollHeight;
+  });
 }
 
 function stopRun() {
@@ -318,7 +567,7 @@ function retry() {
   if (running) return;
   const chat = activeChat();
   if (!chat) return;
-  if (chat.messages[chat.messages.length - 1]?.role === 'assistant') chat.messages.pop();
+  while (chat.messages.length && (chat.messages[chat.messages.length - 1].role === 'assistant' || chat.messages[chat.messages.length - 1].hidden)) chat.messages.pop();
   if (!chat.messages.length) return;
   complete(chat);
 }
@@ -445,6 +694,75 @@ async function attachFiles(files) {
   }
 }
 
+/* ================= команды ================= */
+
+function toggleAgent(key) {
+  const a = state.settings.agent;
+  a[key] = !a[key];
+  saveSettings();
+  updateComposer();
+  if (!activeChat()?.messages.length) renderThread();
+  toast(key === 'on' ? (a.on ? 'Агент включён' : 'Агент выключен, обычный чат') : a.plan ? 'Режим плана: без правок' : 'Режим плана выключен');
+}
+
+function suggestName(lang, code) {
+  const l = String(lang || '').toLowerCase();
+  const base = { html: 'index.html', htm: 'index.html', svg: 'image.svg', css: 'style.css', js: 'script.js', javascript: 'script.js', ts: 'main.ts', typescript: 'main.ts', py: 'main.py', python: 'main.py', json: 'data.json', sh: 'run.sh', bash: 'run.sh', md: 'README.md' }[l]
+    || (/^\s*(<!doctype html|<html)/i.test(code) ? 'index.html' : 'file.txt');
+  if (!W.exists(base)) return base;
+  const [n, ext] = base.split(/\.(?=[^.]+$)/);
+  for (let i = 2; i < 100; i++) if (!W.exists(`${n}-${i}.${ext}`)) return `${n}-${i}.${ext}`;
+  return base;
+}
+
+async function saveSnippet(code, lang) {
+  const name = prompt('Сохранить в проект как', suggestName(lang, code));
+  if (!name || !name.trim()) return;
+  try {
+    const path = name.trim();
+    const before = W.exists(path) ? await W.readText(path).catch(() => null) : null;
+    if (before !== null && !confirm(`Файл ${path} уже есть. Заменить?`)) return;
+    await W.writeText(path, code);
+    W.recordChange(`${before === null ? 'Создан' : 'Заменён'} ${path} из чата`, [{ path, before, after: code }]);
+    toast(`Сохранено: ${path}`);
+    P.showFile(path);
+  } catch (e) { toast(e.message || 'Не получилось сохранить'); }
+}
+
+function commands() {
+  const list = [
+    { label: 'Новый чат', run: newChat },
+    ...Object.values(MODES).map((m) => ({ label: `Режим ${m.label}`, hint: m.hint, run: () => switchMode(m.id), when: () => state.mode !== m.id })),
+    { label: 'Выбрать модель', run: openModelDialog },
+    { label: 'Настройки', run: () => openSettings(settingsCtx) },
+    { label: 'Коннекторы', hint: 'GitHub, Vercel', run: () => openConnectors(connectorCtx) },
+    { label: 'Остановить ответ', hint: 'Esc', run: stopRun, when: () => Boolean(running) },
+  ];
+  if (state.mode === 'code') {
+    list.push(
+      { label: P.isOpen() ? 'Скрыть панель проекта' : 'Показать панель проекта', hint: 'Ctrl J', run: () => P.togglePanel() },
+      { label: 'Файлы проекта', run: () => P.openPanel('files') },
+      { label: 'Превью', hint: 'открыть index.html', run: () => (W.exists('index.html') ? P.previewFile('index.html') : P.openPanel('preview')) },
+      { label: 'Консоль', run: () => P.openPanel('console') },
+      { label: 'Правки и откат', run: () => P.openPanel('changes') },
+      { label: 'Откатить последнюю правку', run: async () => { const e = W.ws.history.find((h) => !h.undone); if (!e) return toast('Откатывать нечего'); await W.undoEntry(e.id); toast(`Откатил: ${e.label}`); } },
+      { label: 'Открыть папку с компьютера', hint: 'Chrome, Edge', run: () => W.pickFolder().then(() => toast(`Подключена папка «${W.ws.name}»`)).catch((e) => { if (e.name !== 'AbortError') toast(e.message || 'Не вышло'); }), when: () => W.hasFsApi && W.ws.kind !== 'fs' },
+      { label: 'Вернуться в песочницу', run: () => W.useVirtual(), when: () => W.ws.kind === 'fs' },
+      { label: state.settings.agent.on ? 'Выключить агента' : 'Включить агента', run: () => toggleAgent('on') },
+      { label: state.settings.agent.plan ? 'Выключить режим плана' : 'Включить режим плана', hint: 'сначала план, без правок', run: () => toggleAgent('plan'), when: () => state.settings.agent.on }
+    );
+  }
+  for (const t of THEMES) list.push({ label: `Тема: ${t.label}`, run: () => { state.settings.theme = t.id; saveSettings(); applyAppearance(); }, when: () => state.settings.theme !== t.id });
+  list.push({
+    label: 'Скопировать последний ответ',
+    run: async () => {
+      const m = [...(activeChat()?.messages || [])].reverse().find((x) => x.role === 'assistant' && shownText(x));
+      if (m && (await copyText(shownText(m)))) toast('Ответ скопирован');
+    },
+  });
+  return list;
+}
+
 /* ================= события ================= */
 
 function autosize() {
@@ -486,8 +804,12 @@ function bind() {
   $('scrim').addEventListener('click', closeRail);
   $('openSettings').addEventListener('click', () => { closeRail(); openSettings(settingsCtx); });
   $('openConnectors').addEventListener('click', () => { closeRail(); openConnectors(connectorCtx); });
+  $('openPalette').addEventListener('click', () => { closeRail(); openPalette(commands()); });
   $('ctxBtn').addEventListener('click', () => openConnectors(connectorCtx));
   $('attachBtn').addEventListener('click', () => $('fileInput').click());
+  $('agentBtn').addEventListener('click', () => toggleAgent('on'));
+  $('planBtn').addEventListener('click', () => toggleAgent('plan'));
+  $('panelBtn').addEventListener('click', () => P.togglePanel());
   $('fileInput').addEventListener('change', async (e) => {
     await attachFiles([...e.target.files]);
     e.target.value = '';
@@ -517,21 +839,24 @@ function bind() {
   });
 
   $('thread').addEventListener('click', async (e) => {
+    const block = e.target.closest('.code');
+    const codeOf = () => block?.querySelector('code')?.textContent || '';
     const copyBtn = e.target.closest('[data-copy]');
     if (copyBtn) {
-      const code = copyBtn.closest('.code')?.querySelector('code')?.textContent || '';
-      const ok = await copyText(code);
+      const ok = await copyText(codeOf());
       copyBtn.textContent = ok ? 'Скопировано' : 'Не вышло';
       setTimeout(() => { copyBtn.textContent = 'Копировать'; }, 1300);
       return;
     }
+    if (e.target.closest('[data-run]')) return P.previewSnippet(codeOf(), block.dataset.lang);
+    if (e.target.closest('[data-save]')) return saveSnippet(codeOf(), block.dataset.lang);
     const act = e.target.closest('[data-act]');
     if (!act) return;
     if (act.dataset.act === 'retry') return retry();
     if (act.dataset.act === 'copy') {
       const id = act.closest('.msg')?.dataset.id;
       const m = activeChat()?.messages.find((x) => x.id === id);
-      if (m && (await copyText(m.text))) toast('Ответ скопирован');
+      if (m && (await copyText(shownText(m)))) toast('Ответ скопирован');
     }
   });
 
@@ -541,11 +866,30 @@ function bind() {
     });
   }
   matchMedia('(pointer: fine)').addEventListener?.('change', updateComposer);
+
+  document.addEventListener('keydown', (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    const key = e.key.toLowerCase();
+    if (mod && key === 'k') {
+      e.preventDefault();
+      const dlg = $('palette');
+      if (dlg.open) dlg.close();
+      else openPalette(commands());
+    } else if (mod && key === 'j' && state.mode === 'code') {
+      e.preventDefault();
+      P.togglePanel();
+    } else if (e.key === 'Escape' && running && !document.querySelector('dialog[open]')) {
+      stopRun();
+    }
+  });
 }
 
 async function init() {
+  initPalette();
+  P.initPanel({ openConnectors: () => openConnectors(connectorCtx), onToggle: () => updateComposer(), onWorkspace: (ev) => { if (ev.type === 'kind' || ev.type === 'index') { if (!activeChat()?.messages.length) renderThread(); } } });
   bind();
   renderAll();
+  W.initWorkspace().catch(() => {});
   try {
     const j = await loadModels();
     models = j.models || [];
@@ -559,3 +903,6 @@ async function init() {
 }
 
 init();
+
+// Для отладки и e2e-тестов.
+window.__pult = { W, S, P, state };

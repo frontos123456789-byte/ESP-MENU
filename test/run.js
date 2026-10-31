@@ -19,7 +19,7 @@ function listen(server) {
 }
 
 (async () => {
-  const seen = { auth: null, body: null };
+  const seen = { auth: null, body: null, calls: [] };
 
   const mock = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
@@ -36,6 +36,7 @@ function listen(server) {
             { id: 'a/small:free', name: 'Small (free)', context_length: 8000, pricing: { prompt: '0', completion: '0' }, architecture: { output_modalities: ['text'], input_modalities: ['text'] } },
             { id: 'b/big:free', name: 'Big (free)', context_length: 200000, pricing: { prompt: '0', completion: '0' }, architecture: { output_modalities: ['text'], input_modalities: ['text', 'image'] } },
             { id: 'c/paid', name: 'Paid', context_length: 1000000, pricing: { prompt: '0.001', completion: '0.002' }, architecture: { output_modalities: ['text'] } },
+            { id: 'thinkingmachines/inkling:free', name: 'Inkling (free)', context_length: 1048576, pricing: { prompt: '0', completion: '0' }, architecture: { output_modalities: ['text'], input_modalities: ['text'] } },
             { id: 'd/image:free', name: 'Img', context_length: 1, pricing: { prompt: '0', completion: '0' }, architecture: { output_modalities: ['image'] } },
           ],
         });
@@ -70,6 +71,22 @@ function listen(server) {
       if (url.pathname === '/gh/repos/me/app/commits') {
         return json(200, [{ sha: 'abcdef123456', commit: { message: 'fix: bug\n\nbody', author: { name: 'Me', date: '2026-01-02' } } }]);
       }
+      if (url.pathname.startsWith('/gh/repos/me/app/git/') || url.pathname === '/vc/v13/deployments') {
+        const b = raw ? JSON.parse(raw) : null;
+        seen.calls.push(`${req.method} ${url.pathname}`);
+        seen.last = b;
+        if (url.pathname === '/vc/v13/deployments') {
+          seen.deploy = { auth: req.headers.authorization, team: url.searchParams.get('teamId'), body: b };
+          return json(200, { id: 'dpl_new', name: b.name, url: `${b.name}-abc.vercel.app`, readyState: 'QUEUED' });
+        }
+        if (url.pathname === '/gh/repos/me/app/git/ref/heads/main') return json(200, { object: { sha: 'base1' } });
+        if (url.pathname.startsWith('/gh/repos/me/app/git/ref/heads/')) return json(404, { message: 'Not Found' });
+        if (url.pathname === '/gh/repos/me/app/git/refs' && req.method === 'POST') return json(201, { ref: b.ref });
+        if (url.pathname === '/gh/repos/me/app/git/commits/base1') return json(200, { tree: { sha: 'tree1' } });
+        if (url.pathname === '/gh/repos/me/app/git/trees') { seen.tree = b; return json(201, { sha: 'tree2' }); }
+        if (url.pathname === '/gh/repos/me/app/git/commits' && req.method === 'POST') { seen.commit = b; return json(201, { sha: 'commit9' }); }
+        if (url.pathname.startsWith('/gh/repos/me/app/git/refs/heads/') && req.method === 'PATCH') return json(200, { object: { sha: b.sha } });
+      }
       if (url.pathname === '/vc/v9/projects') {
         if (req.headers.authorization !== 'Bearer vcgood') return json(403, { error: { code: 'forbidden' } });
         return json(200, { projects: [{ id: 'prj_1', name: 'site', framework: 'nextjs', updatedAt: 1, link: { org: 'me', repo: 'site' } }] });
@@ -102,7 +119,7 @@ function listen(server) {
 
   await check('models: только бесплатные текстовые, по контексту', async () => {
     const j = await (await fetch(base + '/api/models')).json();
-    assert.deepStrictEqual(j.models.map((m) => m.id), ['b/big:free', 'a/small:free']);
+    assert.deepStrictEqual(j.models.map((m) => m.id), ['b/big:free', 'a/small:free'], 'Inkling и платные не должны попадать');
     assert.strictEqual(j.models[0].name, 'Big');
     assert.strictEqual(j.models[0].vision, true);
     assert.strictEqual(j.fallback, false);
@@ -127,6 +144,12 @@ function listen(server) {
     assert.strictEqual(seen.auth, 'Bearer server-key');
     assert.strictEqual(seen.body.stream, true);
     assert.strictEqual(seen.body.temperature, 0.5);
+  });
+
+  await check('chat: stop-последовательности доходят до модели (не больше четырёх)', async () => {
+    const r = await post({ model: 'b/big:free', messages: msgs, stop: ['<tool_result', '', 7, 'a', 'b', 'c', 'd'] });
+    await r.text();
+    assert.deepStrictEqual(seen.body.stop, ['<tool_result', 'a', 'b', 'c']);
   });
 
   await check('chat: серверный ключ не пускает платные модели', async () => {
@@ -216,6 +239,48 @@ function listen(server) {
     assert.strictEqual(bad.status, 401);
     const h = { 'x-vercel-token': 'vcgood' };
     assert.strictEqual((await fetch(base + '/api/vercel?op=logs&deployment=a/../b', { headers: h })).status, 400);
+  });
+
+  await check('vercel: деплой проекта из браузера', async () => {
+    const h = { 'x-vercel-token': 'vcgood', 'x-vercel-team': 'team_abc', 'Content-Type': 'application/json' };
+    const r = await fetch(base + '/api/vercel?op=deploy', { method: 'POST', headers: h, body: JSON.stringify({ name: 'Мой Трейлер 2', files: [{ path: 'index.html', data: '<h1>hi</h1>' }, { path: 'app/main.js', data: 'x' }] }) });
+    assert.strictEqual(r.status, 400, 'имя без латиницы даёт пустое имя');
+    const ok = await fetch(base + '/api/vercel?op=deploy', { method: 'POST', headers: h, body: JSON.stringify({ name: 'My Trailer 2', files: [{ path: 'index.html', data: '<h1>hi</h1>' }, { path: 'app/main.js', data: 'x' }] }) });
+    assert.strictEqual(ok.status, 200);
+    const j = await ok.json();
+    assert.strictEqual(j.productionUrl, 'https://my-trailer-2.vercel.app');
+    assert.strictEqual(seen.deploy.team, 'team_abc');
+    assert.deepStrictEqual(seen.deploy.body.files.map((f) => f.file), ['index.html', 'app/main.js']);
+    assert.strictEqual(seen.deploy.body.target, 'production');
+    assert.strictEqual(seen.deploy.body.projectSettings.framework, null);
+  });
+
+  await check('vercel/github: опасные файлы и пути не уходят наружу', async () => {
+    const h = { 'x-vercel-token': 'vcgood', 'Content-Type': 'application/json' };
+    const bad = (files) => fetch(base + '/api/vercel?op=deploy', { method: 'POST', headers: h, body: JSON.stringify({ name: 'x', files }) });
+    assert.strictEqual((await bad([{ path: '../x', data: '1' }])).status, 400);
+    assert.strictEqual((await bad([{ path: '.env', data: 'K=1' }])).status, 400);
+    assert.strictEqual((await bad([{ path: 'a/.git/config', data: '1' }])).status, 400);
+    assert.strictEqual((await bad([])).status, 400);
+    assert.strictEqual((await fetch(base + '/api/vercel?op=deploy', { headers: { 'x-vercel-token': 'vcgood' } })).status, 405);
+  });
+
+  await check('github: коммит проекта в новую ветку через git data API', async () => {
+    seen.calls.length = 0;
+    const h = { 'x-github-token': 'ghgood', 'Content-Type': 'application/json' };
+    const r = await fetch(base + '/api/github?op=commit', { method: 'POST', headers: h, body: JSON.stringify({ repo: 'me/app', branch: 'feat-x', message: 'Из Пульта', files: [{ path: 'index.html', data: '<h1>1</h1>' }] }) });
+    assert.strictEqual(r.status, 200, await r.clone().text());
+    const j = await r.json();
+    assert.strictEqual(j.branch, 'feat-x');
+    assert.strictEqual(j.sha, 'commit9');
+    assert.match(j.compare, /compare\/main\.\.\.feat-x$/);
+    assert.deepStrictEqual(seen.tree.tree[0], { path: 'index.html', mode: '100644', type: 'blob', content: '<h1>1</h1>' });
+    assert.strictEqual(seen.tree.base_tree, 'tree1');
+    assert.strictEqual(seen.commit.message, 'Из Пульта');
+    assert.deepStrictEqual(seen.commit.parents, ['base1']);
+    assert.ok(seen.calls.includes('PATCH /gh/repos/me/app/git/refs/heads/feat-x'));
+    const badRepo = await fetch(base + '/api/github?op=commit', { method: 'POST', headers: h, body: JSON.stringify({ repo: 'me/app;x', files: [{ path: 'a', data: '1' }] }) });
+    assert.strictEqual(badRepo.status, 400);
   });
 
   await check('статика: index отдаётся (если уже собран), служебные api недоступны', async () => {

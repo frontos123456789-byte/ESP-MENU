@@ -84,4 +84,22 @@ function cut(text, max) {
   return { text: text.slice(0, max), truncated: true };
 }
 
-module.exports = { send, fail, readJson, requireAccess, query, handler, cut };
+// Файлы проекта из браузера: [{ path, data }] без путей-ловушек и секретов.
+function cleanFiles(list, { max = 300 } = {}) {
+  if (!Array.isArray(list) || !list.length) throw fail(400, 'Нет файлов для отправки');
+  if (list.length > max) throw fail(400, `Слишком много файлов (больше ${max})`);
+  const out = [];
+  const seen = new Set();
+  for (const f of list) {
+    const path = typeof f?.path === 'string' ? f.path.replace(/\\/g, '/').replace(/^\.?\/+/, '') : '';
+    if (!path || path.length > 300 || path.split('/').some((x) => x === '' || x === '.' || x === '..' || x === '.git')) throw fail(400, `Некорректный путь: ${String(f?.path).slice(0, 80)}`);
+    if (/(^|\/)(\.env(\..*)?|[^/]*\.pem|id_rsa[^/]*)$/i.test(path)) throw fail(400, `Секретный файл не отправляю: ${path}`);
+    if (typeof f.data !== 'string') throw fail(400, `У файла ${path} нет содержимого`);
+    if (seen.has(path)) continue;
+    seen.add(path);
+    out.push({ path, data: f.data });
+  }
+  return out;
+}
+
+module.exports = { send, fail, readJson, requireAccess, query, handler, cut, cleanFiles };

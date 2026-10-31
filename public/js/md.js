@@ -1,3 +1,5 @@
+import { highlight } from './syntax.js';
+
 // Маленький безопасный рендер markdown: без зависимостей, всё экранируется.
 // Недозакрытый блок кода (пока идёт стрим) показывается как код.
 
@@ -22,10 +24,14 @@ function inline(text) {
 
 function codeBlock(code, lang) {
   const label = escapeHtml(lang || 'текст');
+  const kind = String(lang || '').toLowerCase();
+  const runnable = /^(html?|svg)$/.test(kind) || (!kind && /^\s*(<!doctype html|<html)/i.test(code));
   return (
-    `<div class="code"><div class="code-head"><span>${label}</span>` +
-    `<button type="button" class="code-copy" data-copy>Копировать</button></div>` +
-    `<pre><code>${escapeHtml(code)}</code></pre></div>`
+    `<div class="code" data-lang="${escapeHtml(kind)}"><div class="code-head"><span>${label}</span><span class="code-acts">` +
+    (runnable ? `<button type="button" class="code-copy" data-run>Превью</button>` : '') +
+    `<button type="button" class="code-copy" data-save>В проект</button>` +
+    `<button type="button" class="code-copy" data-copy>Копировать</button></span></div>` +
+    `<pre><code>${highlight(code, kind)}</code></pre></div>`
   );
 }
 
