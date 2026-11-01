@@ -101,10 +101,12 @@ export function initPanel(context) {
     const up = () => {
       handle.removeEventListener('pointermove', move);
       handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
       persist();
     };
     handle.addEventListener('pointermove', move);
     handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
   });
 
   W.onChange((ev) => {
@@ -240,11 +242,22 @@ function projectBar() {
   return el('div', {}, box, ...notes);
 }
 
+let renderSeq = 0;
+
 export function renderFiles() {
   if (!panes.files) return;
   const pane = panes.files;
+  // пока человек правит файл, не перерисовываем панель: иначе пропадёт его ввод
+  if (ps.file && ps.edit && pane.querySelector('textarea.editor')) return;
+  const seq = ++renderSeq;
+  if (ps.file) {
+    // viewer асинхронный: собираем во временный контейнер и подменяем, только если мы последние
+    const tmp = el('div', { class: 'vwrap' });
+    return renderViewer(tmp).then(() => {
+      if (seq === renderSeq) pane.replaceChildren(...tmp.childNodes);
+    });
+  }
   pane.replaceChildren();
-  if (ps.file) return renderViewer(pane);
   pane.append(projectBar());
   if (!W.ws.index.length) {
     pane.append(
@@ -299,6 +312,7 @@ async function renderViewer(pane) {
     return;
   }
   if (ps.file !== path) return;
+  const loaded = text;
 
   const acts = el('div', { class: 'vacts' });
   const isHtml = /\.html?$/i.test(path);
@@ -321,6 +335,10 @@ async function renderViewer(pane) {
     const save = async () => {
       if (ta.value === text) { ps.edit = false; return renderFiles(); }
       try {
+        // пока ты правил, файл мог поменяться (например, агентом)
+        let cur = null;
+        try { cur = await W.peekText(path); } catch { cur = null; }
+        if (cur !== null && cur !== loaded && !confirm('Файл изменился, пока ты его правил (возможно, агентом). Перезаписать твоей версией?')) return;
         await W.writeText(path, ta.value);
         W.recordChange(`Правка вручную ${path}`, [{ path, before: text, after: ta.value }]);
         toast('Сохранено');
@@ -350,7 +368,15 @@ async function newFile() {
   const name = prompt('Имя файла, например index.html или src/app.js');
   if (!name || !name.trim()) return;
   try {
-    const p = await W.writeText(name.trim(), '');
+    const want = W.normPath(name.trim());
+    if ((await W.peekText(want)) !== null) {
+      toast('Такой файл уже есть, открываю его');
+      ps.file = want;
+      ps.edit = false;
+      setTab('files');
+      return renderFiles();
+    }
+    const p = await W.writeText(want, '');
     W.recordChange(`Создан ${p}`, [{ path: p, before: null, after: '' }]);
     ps.file = p;
     ps.edit = true;
@@ -542,7 +568,9 @@ export async function reloadPreview() {
   return null;
 }
 
+let checking = 0;
 const reloadSoon = debounce(() => {
+  if (checking) return; // агент прямо сейчас проверяет превью: не перезапускаем под ним
   if (ps.previewKind === 'file' && ps.previewPath && W.exists(ps.previewPath)) previewFile(ps.previewPath);
 }, 350);
 
@@ -552,9 +580,14 @@ function isPreviewDep(path) {
 
 // Для инструмента агента: открыть страницу, подождать, вернуть консоль.
 export async function checkPreview(path, settle = 2500) {
-  const id = await previewFile(path);
-  await new Promise((r) => setTimeout(r, settle));
-  return { logs: S.logsOf(id).map((l) => ({ level: l.level, text: l.text })) };
+  checking++;
+  try {
+    const id = await previewFile(path);
+    await new Promise((r) => setTimeout(r, settle));
+    return { logs: S.logsOf(id).map((l) => ({ level: l.level, text: l.text })) };
+  } finally {
+    checking--;
+  }
 }
 
 function downloadPreview() {
@@ -621,7 +654,7 @@ function renderChanges() {
           el('button', { class: 'chg-main', type: 'button', onclick: () => { open ? ps.expanded.delete(h.id) : ps.expanded.add(h.id); renderChanges(); }, 'aria-expanded': String(open) },
             el('span', { class: 'caret' }, open ? '▾' : '▸'), el('span', { class: 'chg-label' }, h.label), el('small', {}, ago(h.ts))),
           el('span', { class: 'stat' }, el('b', { class: 'plus' }, `+${st.add}`), ' ', el('b', { class: 'minus' }, `−${st.del}`)),
-          el('button', { class: 'pbtn', type: 'button', disabled: h.undone, onclick: async () => { try { await W.undoEntry(h.id); toast('Откатил'); } catch (e) { toast(e.message || 'Не вышло откатить'); } } }, h.undone ? 'Откачено' : 'Откатить')),
+          el('button', { class: 'pbtn', type: 'button', disabled: h.undone, onclick: async () => { try { toast((await W.undoWithConfirm(h.id, async (q) => confirm(q))) ? 'Откатил' : 'Оставил как есть'); } catch (e) { toast(e.message || 'Не вышло откатить'); } } }, h.undone ? 'Откачено' : 'Откатить')),
         open && c ? renderDiff(diffOf(c.before, c.after)) : null);
     })
   );

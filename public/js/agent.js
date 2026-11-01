@@ -16,7 +16,7 @@ export const TOOL_LABELS = {
   run_js: 'Запускаю код',
   preview: 'Проверяю превью',
 };
-const KNOWN = new Set(Object.keys(TOOL_LABELS));
+export const KNOWN = new Set(Object.keys(TOOL_LABELS));
 
 export const AGENT_RULES = `Ты работаешь как агент: сам смотришь файлы, пишешь и правишь код в проекте пользователя и проверяешь результат.
 
@@ -71,20 +71,92 @@ export async function loadRules() {
 
 /* ---------- разбор ---------- */
 
-function attrsOf(s) {
-  const a = {};
-  for (const m of s.matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) a[m[1]] = m[2] ?? m[3] ?? '';
-  return a;
+// Ограждение ``` вокруг содержимого файла снимаем, только если оно обрамляет файл целиком.
+// Для markdown снимаем лишь явную обёртку ```md / ```markdown: иначе съедим настоящий код внутри README.
+export function stripFence(body, path = '') {
+  const b = body.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+  const m = b.match(/^(`{3,})([^\n`]*)\n([\s\S]*?)\n?\1[ \t]*\s*$/);
+  if (!m) return b;
+  if (/\.(md|mdx|markdown)$/i.test(path) && !/^(md|mdx|markdown)$/i.test(m[2].trim())) return b;
+  return m[3];
 }
 
-function stripFence(body) {
-  let b = body.replace(/^\r?\n/, '').replace(/\r?\n$/, '');
-  const m = b.match(/^```[^\n]*\n([\s\S]*?)\n?```\s*$/);
-  if (m) b = m[1];
-  return b;
+const OPEN_AT = /<tool\s+name\s*=\s*(["'])(\w+)\1/y;
+const ATTR_AT = /\s*([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/y;
+const END_AT = /\s*(\/>|>)/y;
+
+// Разбирает открывающий тег с учётом кавычек: «>» внутри значения атрибута не конец тега.
+function readOpen(text, i) {
+  OPEN_AT.lastIndex = i;
+  const m = OPEN_AT.exec(text);
+  if (!m) return null;
+  let p = OPEN_AT.lastIndex;
+  const attrs = {};
+  for (;;) {
+    ATTR_AT.lastIndex = p;
+    const a = ATTR_AT.exec(text);
+    if (!a) break;
+    attrs[a[1]] = a[2] ?? a[3] ?? '';
+    p = ATTR_AT.lastIndex;
+  }
+  END_AT.lastIndex = p;
+  const e = END_AT.exec(text);
+  if (!e) return { name: m[2], attrs, start: i, end: p, incomplete: true };
+  return { name: m[2], attrs, start: i, end: END_AT.lastIndex, self: e[1] === '/>' };
 }
 
-const CALL_RE = /<tool\s+name\s*=\s*["'](\w+)["']([^>]*?)(?:\/>|>([\s\S]*?)<\/tool>)/g;
+// Следующий настоящий вызов после позиции: в начале строки или сразу после </tool>.
+function nextOpenIndex(text, from) {
+  const re = /<tool\s+name\s*=/g;
+  re.lastIndex = from;
+  for (let m; (m = re.exec(text)); ) {
+    const lineStart = text.slice(text.lastIndexOf('\n', m.index - 1) + 1, m.index);
+    if (/^\s*$/.test(lineStart) || /<\/tool>\s*$/.test(text.slice(Math.max(0, m.index - 40), m.index))) {
+      if (readOpen(text, m.index)) return m.index;
+    }
+  }
+  return -1;
+}
+
+// Находит все вызовы. Закрывающий </tool> берётся последний перед следующим вызовом, поэтому
+// сам текст файла может содержать "</tool>" и ">" внутри атрибутов.
+export function scanCalls(text) {
+  const calls = [];
+  let truncated = null;
+  const re = /<tool\s+name\s*=/g;
+  let from = 0;
+  for (;;) {
+    re.lastIndex = from;
+    const m = re.exec(text);
+    if (!m) break;
+    const o = readOpen(text, m.index);
+    if (!o) { from = m.index + 5; continue; }
+    if (o.incomplete) {
+      if (/^\s*$/.test(text.slice(o.end))) truncated = { name: o.name, attrs: o.attrs, start: o.start };
+      from = o.end;
+      continue;
+    }
+    if (o.self) {
+      calls.push({ name: o.name, attrs: o.attrs, body: '', start: o.start, end: o.end });
+      from = o.end;
+      continue;
+    }
+    const nxt = nextOpenIndex(text, o.end);
+    const limit = nxt < 0 ? text.length : nxt;
+    const close = text.lastIndexOf('</tool>', limit - 1);
+    if (close >= o.end) {
+      calls.push({ name: o.name, attrs: o.attrs, body: text.slice(o.end, close), start: o.start, end: close + 7 });
+      from = close + 7;
+    } else if (nxt < 0) {
+      truncated = { name: o.name, attrs: o.attrs, start: o.start };
+      break;
+    } else {
+      calls.push({ name: o.name, attrs: o.attrs, body: '', start: o.start, end: nxt, unclosed: true });
+      from = nxt;
+    }
+  }
+  return { calls, truncated };
+}
 
 // Режем всё после выдуманного ответа инструмента.
 export function cutHallucination(text) {
@@ -94,48 +166,62 @@ export function cutHallucination(text) {
 
 export function parseCalls(rawText) {
   const text = cutHallucination(rawText);
-  const calls = [];
-  let end = 0;
-  for (const m of text.matchAll(CALL_RE)) {
-    end = m.index + m[0].length;
-    if (!KNOWN.has(m[1])) continue;
-    calls.push({ name: m[1], attrs: attrsOf(m[2] || ''), body: m[3] ?? '' });
-  }
-  // оборванный блок в конце (модель упёрлась в лимит длины)
-  const tail = text.slice(end);
-  const open = tail.match(/<tool\s+name\s*=\s*["'](\w+)["']([^>]*)>/);
-  const truncated = open && !/<\/tool>/.test(tail.slice(open.index)) && !/\/>\s*$/.test(open[0]) ? { name: open[1], attrs: attrsOf(open[2] || '') } : null;
-  return { calls, truncated, text };
+  const { calls: all, truncated } = scanCalls(text);
+  const calls = all.filter((c) => KNOWN.has(c.name));
+  const unknown = [...new Set(all.filter((c) => !KNOWN.has(c.name)).map((c) => c.name))];
+  return { calls, unknown, truncated: truncated && KNOWN.has(truncated.name) ? truncated : null, text };
 }
 
 // Текст для показа: без блоков инструментов.
 export function stripCalls(raw) {
-  let t = cutHallucination(raw);
-  t = t.replace(CALL_RE, '');
-  const i = t.search(/<tool\s+name\s*=/);
-  if (i >= 0) t = t.slice(0, i);
-  return t.replace(/\n{3,}/g, '\n\n').trim();
+  const t0 = cutHallucination(raw);
+  const { calls, truncated } = scanCalls(t0);
+  let out = '';
+  let pos = 0;
+  for (const c of calls) {
+    out += t0.slice(pos, c.start);
+    pos = c.end;
+  }
+  out += t0.slice(pos);
+  if (truncated) {
+    // всё от оборванного блока в хвосте
+    const cut = out.search(/<tool\s+name\s*=[^]*$/);
+    if (cut >= 0) out = out.slice(0, cut);
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // Что модель пишет прямо сейчас (для живого индикатора).
 export function liveTool(raw) {
   const t = cutHallucination(raw);
-  const last = [...t.matchAll(/<tool\s+name\s*=\s*["'](\w+)["']([^>]*)>?/g)].pop();
-  if (!last) return null;
-  const tail = t.slice(last.index);
-  if (/<\/tool>/.test(tail) || /\/>/.test(last[0])) return null;
-  const a = attrsOf(last[2] || '');
-  return { name: last[1], path: a.path || '', chars: tail.length };
+  const { calls, truncated } = scanCalls(t);
+  if (truncated) {
+    return { name: truncated.name, path: truncated.attrs.path || '', chars: t.length - truncated.start };
+  }
+  // последний блок уже закрыт
+  void calls;
+  return null;
 }
 
 /* ---------- сжатие старой истории ---------- */
 
+// Старые вызовы схлопываем, но не врём: если правка не применилась, это остаётся видно в результате.
 export function compactAssistant(raw) {
-  return raw.replace(CALL_RE, (full, name, attrs, body) => {
-    if (body == null || (name !== 'write_file' && name !== 'edit_file' && name !== 'run_js')) return full;
-    const lines = body.split('\n').length;
-    return `<tool name="${name}"${attrs}>[содержимое: ${lines} стр., уже применено]</tool>`;
-  });
+  const { calls } = scanCalls(raw);
+  let out = '';
+  let pos = 0;
+  for (const c of calls) {
+    out += raw.slice(pos, c.start);
+    pos = c.end;
+    if (c.unclosed || !(c.name === 'write_file' || c.name === 'edit_file' || c.name === 'run_js') || !c.body) {
+      out += raw.slice(c.start, c.end);
+      continue;
+    }
+    const lines = c.body.split('\n').length;
+    const attrs = Object.entries(c.attrs).map(([k, v]) => ` ${k}="${v}"`).join('');
+    out += `<tool name="${c.name}"${attrs}>[содержимое: ${lines} стр., см. результат ниже]</tool>`;
+  }
+  return out + raw.slice(pos);
 }
 
 export function compactResult(text) {
@@ -165,6 +251,7 @@ export function applyEdit(text, oldStr, newStr) {
     if (text.indexOf(oldStr, first + 1) >= 0) return { error: 'фрагмент встречается больше одного раза, добавь окружающие строки' };
     return { text: text.slice(0, first) + newStr + text.slice(first + oldStr.length) };
   }
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const want = oldStr.replace(/\r\n/g, '\n').split('\n').map((l) => l.trimEnd());
   const hits = [];
@@ -177,7 +264,7 @@ export function applyEdit(text, oldStr, newStr) {
   }
   if (hits.length === 1) {
     const out = [...lines.slice(0, hits[0]), ...newStr.replace(/\r\n/g, '\n').split('\n'), ...lines.slice(hits[0] + want.length)];
-    return { text: out.join('\n') };
+    return { text: out.join(eol) };
   }
   return { error: hits.length ? 'фрагмент встречается больше одного раза' : 'такого фрагмента в файле нет (проверь пробелы и отступы, прочитай файл заново)' };
 }
@@ -204,11 +291,14 @@ export async function execTool(call, ctx) {
     return { ok: false, output: msg, step };
   };
 
+  if (call.unclosed) return fail(`Блок ${name} не закрыт тегом </tool>, он не выполнен. Повтори вызов целиком.`);
+
   try {
     switch (name) {
       case 'list_files': {
         step.label = attrs.path ? `${TOOL_LABELS[name]} ${attrs.path}` : TOOL_LABELS[name];
-        const t = W.treeText(300, attrs.path || '');
+        const dir = /^(\.?\/?)$/.test((attrs.path || '').trim()) ? '' : attrs.path;
+        const t = W.treeText(300, dir || '');
         return { ok: true, output: t || '(файлов нет)', step };
       }
 
@@ -217,8 +307,9 @@ export async function execTool(call, ctx) {
         step.path = path;
         step.label = `${TOOL_LABELS[name]} ${path}`;
         const text = await W.readText(path, 400_000);
-        const from = Number(attrs.from) || 0;
-        const to = Number(attrs.to) || 0;
+        let from = Number(attrs.from) || 0;
+        let to = Number(attrs.to) || 0;
+        if (from && to && from > to) [from, to] = [to, from];
         if (from || to) {
           const r = numbered(text, from, to);
           return { ok: true, output: `строки ${r.a}–${r.b} из ${r.total}\n${r.body}`, step };
@@ -240,11 +331,10 @@ export async function execTool(call, ctx) {
       case 'write_file': {
         const path = W.normPath(attrs.path);
         step.path = path;
-        const after = stripFence(call.body);
-        let before = null;
-        if (W.exists(path)) {
-          try { before = await W.readText(path); } catch { before = null; }
-        }
+        const after = stripFence(call.body, path);
+        // читаем с диска: индекс может устареть, а «нечитаемый» файл не то же самое, что «нет файла»
+        let before;
+        try { before = await W.peekText(path); } catch (e) { return fail(`Не могу прочитать существующий ${path}: ${e.message}. Файл не тронут.`); }
         step.label = `${before === null ? 'Создаю' : 'Переписываю'} ${path}`;
         if (before === after) return { ok: true, output: `Файл ${path} уже содержит этот текст`, step };
         return await applyChange({ path, before, after, kind: before === null ? 'create' : 'modify' }, ctx, step);
@@ -277,7 +367,7 @@ export async function execTool(call, ctx) {
 
       case 'run_js': {
         step.label = TOOL_LABELS[name];
-        const code = stripFence(call.body);
+        const code = stripFence(call.body, 'run.js');
         if (!code.trim()) return fail('пустой код');
         const r = await ctx.runJs(code);
         const out = r.logs.map((l) => (l.level === 'log' ? l.text : `[${l.level}] ${l.text}`)).join('\n');

@@ -51,4 +51,36 @@ const e=W.ws.history[0]; ok('история', W.ws.history.length===2);
 await W.undoEntry(W.ws.history[0].id); ok('undo edit', (await W.readText('index.html'))==='<h1>Hi</h1>');
 await W.undoEntry(W.ws.history[1].id); ok('undo create', !W.exists('index.html'));
 const reject=await A.execTool({name:'write_file',attrs:{path:'z.js'},body:'1'},{...ctx,confirm:async()=>false}); ok('reject', !reject.ok&&reject.step.status==='rejected'&&!W.exists('z.js'));
+
+// --- регрессии из ревью ---
+{
+  const body = 'const s = "</tool>";\nconsole.log(s)';
+  let pc = A.parseCalls(`Ок\n<tool name="write_file" path="a.js">\n${body}\n</tool>\n<tool name="read_file" path="b.js"/>`);
+  ok('</tool> внутри файла', pc.calls.length === 2 && pc.calls[0].body.includes('console.log(s)'), pc.calls);
+  pc = A.parseCalls('<tool name="write_file" path="a>b.js">\nx\n</tool>');
+  ok('> внутри атрибута', pc.calls.length === 1 && pc.calls[0].attrs.path === 'a>b.js', pc.calls);
+  pc = A.parseCalls('<tool name="hack" path="x"/>\n<tool name="read_file" path="a"/>');
+  ok('неизвестный инструмент отдельно', pc.calls.length === 1 && pc.unknown[0] === 'hack', pc);
+  ok('stripFence md не трогает код', A.stripFence('\n```js\nx\n```\n', 'README.md') === '```js\nx\n```');
+  ok('stripFence md-обёртка', A.stripFence('```md\n# a\n```', 'README.md') === '# a');
+  ok('stripFence 4 тика', A.stripFence('````html\n<p>```</p>\n````', 'a.html') === '<p>```</p>');
+  ok('compact честный', !A.compactAssistant('<tool name="write_file" path="a">\n1\n2\n</tool>').includes('уже применено'));
+  ok('applyEdit CRLF сохраняет', A.applyEdit('a\r\nb  \r\nc', 'b', 'X').text === 'a\r\nX  \r\nc' || A.applyEdit('a\r\nb\r\nc', 'b', 'X').text === 'a\r\nX\r\nc');
+  const r1 = A.parseCalls('<tool name="write_file" path="x.js">\nconst a=');
+  ok('оборванный блок', r1.truncated?.name === 'write_file');
+  ok('секреты: расширенный список', ['.npmrc', 'a/.ssh/config', 'k.key', 'id_ed25519', '.ENV'].every((x) => W.isSecret(x)) && !W.isSecret('.env.example'));
+  let threw = false; try { W.normPath('.GIT/config'); } catch { threw = true; }
+  ok('.GIT закрыт', threw);
+  r = await A.execTool({ name: 'search', attrs: { query: '(a+)+$', regex: 'true' }, body: '' }, ctx);
+  ok('ReDoS отклонён', !r.ok, r.output);
+  await W.writeText('u.txt', 'one');
+  const en = W.recordChange('t', [{ path: 'u.txt', before: null, after: 'one' }]);
+  await W.writeText('u.txt', 'two');
+  let code = '';
+  try { await W.undoEntry(en.id); } catch (e) { code = e.code; }
+  ok('откат отказывает при конфликте', code === 'CONFLICT' && W.exists('u.txt'));
+  ok('откат force', await W.undoEntry(en.id, { force: true }) && !W.exists('u.txt'));
+  r = await A.execTool({ name: 'list_files', attrs: { path: '.' }, body: '' }, ctx);
+  ok('list_files "."', r.ok, r.output);
+}
 console.log(fails?'FAILS '+fails:'ALL OK'); process.exit(fails?1:0);

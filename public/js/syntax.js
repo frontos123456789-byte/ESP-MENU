@@ -22,7 +22,7 @@ const RE = {
   sh: /(#[^\n]*)|("(?:\\.|[^"\\])*"|'[^']*')|(\b\d+\b)|(\$\{?[A-Za-z_][\w]*\}?|[A-Za-z_][\w-]*)/g,
   generic: /(#[^\n]*|\/\/[^\n]*)|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(\b\d[\d_.]*\b)|([A-Za-z_][\w]*)/g,
   css: /(\/\*[\s\S]*?(?:\*\/|$))|("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|(#[\da-fA-F]{3,8}\b|\b\d+(?:\.\d+)?(?:px|em|rem|%|vh|vw|s|ms|deg|fr)?\b)|(@[\w-]+|--[\w-]+|[A-Za-z-]+(?=\s*:(?!:)))/g,
-  html: /(<!--[\s\S]*?(?:-->|$))|(<\/?[A-Za-z][\w:-]*)|((?<==\s*)"[^"\n]*"|(?<==\s*)'[^'\n]*')|([\w:@.-]+(?=\s*=))|(\/?>)/g,
+  html: /(<!--[\s\S]*?(?:-->|$))|(<\/?[A-Za-z][\w:-]*)|("[^"\n]*"|'[^'\n]*')|([\w:@.-]+(?=\s*=))|(\/?>)/g,
   json: /()("(?:\\.|[^"\\\n])*"(?=\s*:))|("(?:\\.|[^"\\\n])*")|(-?\b\d+(?:\.\d+)?(?:[eE][+-]?\d+)?\b)|(true|false|null)/g,
 };
 
@@ -70,7 +70,7 @@ export function highlight(code, lang) {
     if (kind === 'html') {
       if (m[1]) out += span('c', text);
       else if (m[2]) out += span('t', text);
-      else if (m[3]) out += span('s', text);
+      else if (m[3]) out += /=\s*$/.test(code.slice(Math.max(0, m.index - 16), m.index)) ? span('s', text) : esc(text);
       else if (m[4]) out += span('a', text);
       else out += span('t', text);
     } else if (kind === 'css') {

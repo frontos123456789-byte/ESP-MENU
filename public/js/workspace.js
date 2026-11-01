@@ -7,7 +7,9 @@ import { makeZip } from './zip.js';
 
 const IGNORE_DIRS = new Set(['node_modules', 'dist', 'build', 'out', 'coverage', '__pycache__', 'venv', 'target', 'vendor']);
 const BIN_EXT = new Set('png jpg jpeg gif webp ico bmp avif pdf zip gz tar 7z rar mp3 wav ogg flac mp4 webm mov woff woff2 ttf otf eot exe dll so class jar wasm bin psd'.split(' '));
-const SECRET_RE = /(^|\/)(\.env(\..*)?|[^/]*\.pem|id_rsa[^/]*|[^/]*\.p12|[^/]*\.keystore)$/i;
+// Файлы с секретами: агент их не читает и не пишет, в публикацию они не уходят.
+const SECRET_FILE = /^(\.env(?:\.(?!(?:example|sample|template)$).*)?|.*\.(?:pem|key|p12|pfx|keystore|jks)|id_(?:rsa|dsa|ecdsa|ed25519).*|\.npmrc|\.netrc|\.pypirc|\.htpasswd|credentials(?:\..*)?|secrets?\.(?:json|ya?ml|toml)|service[-_]?account.*\.json)$/i;
+const SECRET_DIR = /^(\.ssh|\.aws|\.gnupg|\.kube)$/i;
 const MAX_FILES = 3000;
 const MAX_READ = 1_000_000;
 
@@ -37,7 +39,10 @@ function emit(ev) {
 }
 
 export const isBinaryName = (p) => BIN_EXT.has(String(p).split('.').pop().toLowerCase());
-export const isSecret = (p) => SECRET_RE.test(p);
+export function isSecret(p) {
+  const parts = String(p).replace(/\\/g, '/').split('/');
+  return SECRET_FILE.test(parts[parts.length - 1]) || parts.slice(0, -1).some((x) => SECRET_DIR.test(x));
+}
 
 export function normPath(p) {
   let s = String(p ?? '').replace(/\\/g, '/').trim();
@@ -46,7 +51,7 @@ export function normPath(p) {
   if (s.length > 300) throw new Error('Слишком длинный путь');
   const parts = s.split('/');
   if (parts.some((x) => x === '' || x === '.' || x === '..')) throw new Error(`Недопустимый путь: ${p}`);
-  if (parts.some((x) => x === '.git')) throw new Error('Папку .git трогать нельзя');
+  if (parts.some((x) => x.toLowerCase() === '.git')) throw new Error('Папку .git трогать нельзя');
   return parts.join('/');
 }
 
@@ -214,6 +219,22 @@ export async function readText(rawPath, max = MAX_READ) {
   return file.text();
 }
 
+// Читает с диска. null: файла точно нет. Бросает ошибку, если файл есть, но прочитать нельзя.
+export async function peekText(rawPath, max = MAX_READ) {
+  const path = normPath(rawPath);
+  if (isSecret(path)) throw new Error('Файл с секретами');
+  if (isBinaryName(path)) throw new Error('Бинарный файл');
+  if (ws.kind === 'virtual') return vfiles.has(path) ? vfiles.get(path) : null;
+  let fh;
+  try { fh = await fsFile(path, false); } catch (e) {
+    if (e && e.name === 'NotFoundError') return null;
+    throw e;
+  }
+  const file = await fh.getFile();
+  if (file.size > max) throw new Error(`Файл слишком большой (${Math.round(file.size / 1024)} КБ)`);
+  return file.text();
+}
+
 export async function readBytes(rawPath, max = 2_000_000) {
   const path = normPath(rawPath);
   if (isSecret(path)) throw new Error('Файл с секретами');
@@ -286,6 +307,9 @@ export function treeText(limit = 150, prefix = '') {
 
 export async function searchText(query, { max = 60, regex = false } = {}) {
   let re;
+  if (regex && (query.length > 200 || /\\\d|\([^)]*[+*][^)]*\)\s*[+*{]/.test(query))) {
+    throw new Error('Слишком сложное регулярное выражение (вложенные повторы или обратные ссылки). Упрости или ищи обычным текстом.');
+  }
   try {
     re = regex ? new RegExp(query, 'i') : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   } catch {
@@ -293,14 +317,15 @@ export async function searchText(query, { max = 60, regex = false } = {}) {
   }
   const hits = [];
   let budget = 4_000_000;
+  const deadline = Date.now() + 2500;
   for (const f of ws.index) {
-    if (f.bin || f.size > 300_000 || budget <= 0) continue;
+    if (f.bin || f.size > 300_000 || budget <= 0 || Date.now() > deadline) continue;
     let text;
     try { text = await readText(f.path, 300_000); } catch { continue; }
     budget -= text.length;
     const lines = text.split('\n');
     for (let i = 0; i < lines.length; i++) {
-      if (re.test(lines[i])) {
+      if (re.test(lines[i].slice(0, 400))) {
         hits.push(`${f.path}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
         if (hits.length >= max) return { hits, more: true };
       }
@@ -312,6 +337,7 @@ export async function searchText(query, { max = 60, regex = false } = {}) {
 export async function importFiles(fileList) {
   let n = 0;
   let skipped = 0;
+  const changes = [];
   for (const f of fileList) {
     const name = f.webkitRelativePath || f.name;
     if (isBinaryName(name) || f.size > 1_000_000 || isSecret(name)) {
@@ -321,12 +347,17 @@ export async function importFiles(fileList) {
     try {
       const text = await f.text();
       if (text.includes('\u0000')) { skipped++; continue; }
-      await writeText(name, text);
+      const path = normPath(name);
+      let before = null;
+      try { before = await peekText(path); } catch { before = null; }
+      await writeText(path, text);
+      changes.push({ path, before, after: text });
       n++;
     } catch {
       skipped++;
     }
   }
+  if (changes.length) recordChange(changes.length === 1 ? `Загружен ${changes[0].path}` : `Загружено файлов: ${changes.length}`, changes);
   return { n, skipped };
 }
 
@@ -339,7 +370,7 @@ export async function collectText(maxTotal = 3_500_000) {
     if (f.bin || isSecret(f.path)) { skipped++; continue; }
     let text;
     try { text = await readText(f.path, 1_000_000); } catch { skipped++; continue; }
-    total += text.length;
+    total += byteLen(text);
     if (total > maxTotal) throw new Error('Проект больше 3,5 МБ текста, отправить целиком не получится');
     files.push({ path: f.path, data: text });
   }
@@ -371,9 +402,22 @@ export function recordChange(label, changes) {
   return entry;
 }
 
-export async function undoEntry(id) {
+// Откат одной записи журнала. Если файл с тех пор менялся (после этой правки), без force откат
+// не делаем: иначе молча потеряем чужую работу.
+export async function undoEntry(id, { force = false } = {}) {
   const e = ws.history.find((x) => x.id === id);
   if (!e || e.undone) return false;
+  if (!force) {
+    const conflicts = [];
+    for (const c of e.changes) {
+      let cur;
+      try { cur = await peekText(c.path); } catch { cur = undefined; }
+      if (cur !== c.after && !(cur === null && c.after === null)) conflicts.push(c.path);
+    }
+    if (conflicts.length) {
+      throw Object.assign(new Error(`После этой правки файл менялся: ${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? '…' : ''}. Откат затрёт новые изменения.`), { code: 'CONFLICT' });
+    }
+  }
   for (const c of [...e.changes].reverse()) {
     if (c.before === null) {
       if (exists(c.path)) await removePath(c.path);
@@ -382,4 +426,15 @@ export async function undoEntry(id) {
   e.undone = true;
   emit({ type: 'history', id });
   return true;
+}
+
+// Откат с вопросом при конфликте. Возвращает true, если откатили.
+export async function undoWithConfirm(id, ask) {
+  try {
+    return await undoEntry(id);
+  } catch (err) {
+    if (err.code === 'CONFLICT' && (await ask(`${err.message} Откатить всё равно?`))) return undoEntry(id, { force: true });
+    if (err.code === 'CONFLICT') return false;
+    throw err;
+  }
 }

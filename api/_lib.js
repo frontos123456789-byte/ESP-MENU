@@ -84,6 +84,13 @@ function cut(text, max) {
   return { text: text.slice(0, max), truncated: true };
 }
 
+// Те же правила, что в браузере (public/js/workspace.js): секреты на сервер не принимаем.
+const SECRET_FILE = /^(\.env(?:\.(?!(?:example|sample|template)$).*)?|.*\.(?:pem|key|p12|pfx|keystore|jks)|id_(?:rsa|dsa|ecdsa|ed25519).*|\.npmrc|\.netrc|\.pypirc|\.htpasswd|credentials(?:\..*)?|secrets?\.(?:json|ya?ml|toml)|service[-_]?account.*\.json)$/i;
+function isSecretPath(p) {
+  const parts = p.split('/');
+  return SECRET_FILE.test(parts[parts.length - 1]) || parts.slice(0, -1).some((x) => /^(\.ssh|\.aws|\.gnupg|\.kube)$/i.test(x));
+}
+
 // Файлы проекта из браузера: [{ path, data }] без путей-ловушек и секретов.
 function cleanFiles(list, { max = 300 } = {}) {
   if (!Array.isArray(list) || !list.length) throw fail(400, 'Нет файлов для отправки');
@@ -92,8 +99,8 @@ function cleanFiles(list, { max = 300 } = {}) {
   const seen = new Set();
   for (const f of list) {
     const path = typeof f?.path === 'string' ? f.path.replace(/\\/g, '/').replace(/^\.?\/+/, '') : '';
-    if (!path || path.length > 300 || path.split('/').some((x) => x === '' || x === '.' || x === '..' || x === '.git')) throw fail(400, `Некорректный путь: ${String(f?.path).slice(0, 80)}`);
-    if (/(^|\/)(\.env(\..*)?|[^/]*\.pem|id_rsa[^/]*)$/i.test(path)) throw fail(400, `Секретный файл не отправляю: ${path}`);
+    if (!path || path.length > 300 || path.split('/').some((x) => x === '' || x === '.' || x === '..' || x.toLowerCase() === '.git')) throw fail(400, `Некорректный путь: ${String(f?.path).slice(0, 80)}`);
+    if (isSecretPath(path)) throw fail(400, `Секретный файл не отправляю: ${path}`);
     if (typeof f.data !== 'string') throw fail(400, `У файла ${path} нет содержимого`);
     if (seen.has(path)) continue;
     seen.add(path);

@@ -13,7 +13,7 @@ import * as P from './panel.js';
 import { openPalette, initPalette } from './palette.js';
 import {
   agentSystem, loadRules, parseCalls, stripCalls, liveTool, cutHallucination, execTool, resultBlock,
-  compactAssistant, compactResult, TOOL_LABELS, MAX_CALLS_PER_TURN,
+  compactAssistant, compactResult, TOOL_LABELS, MAX_CALLS_PER_TURN, KNOWN,
 } from './agent.js';
 
 const $ = (id) => document.getElementById(id);
@@ -324,7 +324,23 @@ async function buildMessages(chat, endIdx, agent) {
     total += len;
   }
   while (kept.length > 1 && kept[0].role === 'assistant') kept.shift();
-  return [{ role: 'system', content: sys }, ...kept];
+  // Исходную задачу и последнюю просьбу человека не теряем, даже если они не влезли в бюджет.
+  const real = slice.map((m, i) => (m.role === 'user' && !m.hidden ? i : -1)).filter((i) => i >= 0);
+  const pins = [];
+  if (real.length) {
+    const first = hist[real[0]];
+    const last = hist[real[real.length - 1]];
+    if (!kept.includes(first)) pins.push({ role: 'user', content: `[Начало диалога обрезано. Исходная задача пользователя]\n${first.content.slice(0, 4000)}` });
+    if (last !== first && !kept.includes(last)) pins.push({ role: 'user', content: `[Последняя просьба пользователя]\n${last.content.slice(0, 4000)}` });
+  }
+  // одинаковые роли подряд склеиваем: часть провайдеров такое не принимает
+  const merged = [];
+  for (const m of [...pins, ...kept]) {
+    const prev = merged[merged.length - 1];
+    if (prev && prev.role === m.role) prev.content += `\n\n${m.content}`;
+    else merged.push({ ...m });
+  }
+  return [{ role: 'system', content: sys }, ...merged];
 }
 
 // Одна реплика модели со стримингом и переключением на запасные модели.
@@ -437,14 +453,28 @@ async function runAgent(chat, controller) {
   const ctx = toolCtx(chat, controller);
   let last = null;
   let step = 0;
+  let dirty = false; // были правки, после которых ничего не проверяли
+  let nudged = false; // напоминание о проверке шлём не больше одного раза за запуск
   for (; step < max; step++) {
     const r = await streamReply(chat, controller, { agent: true });
     const msg = r.msg;
     last = msg;
     if (r.aborted || r.failed || !chat.messages.includes(msg)) break;
 
-    const { calls, truncated } = parseCalls(msg.text);
-    if (!calls.length && !truncated) break;
+    const { calls, unknown, truncated } = parseCalls(msg.text);
+    if (!calls.length && !truncated && !unknown.length) {
+      // Правило остановки: сделал правки, значит проверь. Один раз напоминаем и даём ещё шаг.
+      if (dirty && !nudged && state.settings.agent.verify && !state.settings.agent.plan && step < max - 1) {
+        nudged = true;
+        chat.messages.push({
+          id: uid(), role: 'user', hidden: true, ts: Date.now(),
+          text: '[проверка] Ты менял файлы и не проверял результат. Прежде чем завершить: вызови preview для html или run_js для кода, прочитай ошибки консоли и исправь их. Если всё чисто, дай короткий итог.',
+        });
+        saveChats(true);
+        continue;
+      }
+      break;
+    }
 
     running.phase = 'tools';
     msg.steps = [];
@@ -467,6 +497,8 @@ async function runAgent(chat, controller) {
       }
       Object.assign(st, res.step);
       blocks.push(resultBlock(call, res));
+      if (res.ok && WRITERS.has(call.name) && /\.(html?|m?js|css|svg|jsx?|tsx?)$/i.test(st.path || '')) dirty = true;
+      if (call.name === 'preview' || call.name === 'run_js') dirty = false;
 
       if (res.ok && !usedPreview && WRITERS.has(call.name) && /\.html?$/i.test(st.path)) {
         if (!P.isOpen() || P.previewing() === st.path || !P.previewing()) P.previewFile(st.path);
@@ -476,6 +508,9 @@ async function runAgent(chat, controller) {
       replaceMsg(msg, chat);
     }
     if (calls.length > todo.length) blocks.push(`Выполнено только ${todo.length} из ${calls.length} вызовов (лимит за один ход). Остальные повтори следующим ходом.`);
+    for (const n of unknown) {
+      blocks.push(`<tool_result name="${n.replace(/[^\w]/g, '')}" ok="false">\nТакого инструмента нет. Доступны только: ${[...KNOWN].join(', ')}.\n</tool_result>`);
+    }
     if (truncated) {
       blocks.push(
         `<tool_result name="${truncated.name}" ok="false">\nТвой ответ оборвался по длине на блоке ${truncated.name}, файл НЕ записан. Пиши файл короче или по частям: сначала каркас через write_file, потом дополняй через edit_file.\n</tool_result>`
@@ -513,6 +548,7 @@ function hideApproval() {
 
 function askApproval(chat, change, controller) {
   return new Promise((resolve) => {
+    if (controller.signal.aborted) return resolve(false);
     hideApproval();
     const box = $('approval');
     const verb = change.kind === 'create' ? 'создать' : change.kind === 'delete' ? 'удалить' : 'изменить';
@@ -539,6 +575,7 @@ function askApproval(chat, change, controller) {
     box.hidden = false;
     const w = $('threadWrap');
     w.scrollTop = w.scrollHeight;
+    box.scrollIntoView?.({ block: 'nearest' });
   });
 }
 
@@ -720,7 +757,7 @@ async function saveSnippet(code, lang) {
   if (!name || !name.trim()) return;
   try {
     const path = name.trim();
-    const before = W.exists(path) ? await W.readText(path).catch(() => null) : null;
+    const before = await W.peekText(path);
     if (before !== null && !confirm(`Файл ${path} уже есть. Заменить?`)) return;
     await W.writeText(path, code);
     W.recordChange(`${before === null ? 'Создан' : 'Заменён'} ${path} из чата`, [{ path, before, after: code }]);
@@ -745,7 +782,7 @@ function commands() {
       { label: 'Превью', hint: 'открыть index.html', run: () => (W.exists('index.html') ? P.previewFile('index.html') : P.openPanel('preview')) },
       { label: 'Консоль', run: () => P.openPanel('console') },
       { label: 'Правки и откат', run: () => P.openPanel('changes') },
-      { label: 'Откатить последнюю правку', run: async () => { const e = W.ws.history.find((h) => !h.undone); if (!e) return toast('Откатывать нечего'); await W.undoEntry(e.id); toast(`Откатил: ${e.label}`); } },
+      { label: 'Откатить последнюю правку', run: async () => { const e = W.ws.history.find((h) => !h.undone); if (!e) return toast('Откатывать нечего'); try { toast((await W.undoWithConfirm(e.id, async (q) => confirm(q))) ? `Откатил: ${e.label}` : 'Оставил как есть'); } catch (err) { toast(err.message || 'Не вышло откатить'); } } },
       { label: 'Открыть папку с компьютера', hint: 'Chrome, Edge', run: () => W.pickFolder().then(() => toast(`Подключена папка «${W.ws.name}»`)).catch((e) => { if (e.name !== 'AbortError') toast(e.message || 'Не вышло'); }), when: () => W.hasFsApi && W.ws.kind !== 'fs' },
       { label: 'Вернуться в песочницу', run: () => W.useVirtual(), when: () => W.ws.kind === 'fs' },
       { label: state.settings.agent.on ? 'Выключить агента' : 'Включить агента', run: () => toggleAgent('on') },

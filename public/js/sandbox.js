@@ -62,7 +62,7 @@ function captureScript(id) {
 
 function injectHead(html, snippet) {
   const doctype = html.match(/^\s*<!doctype[^>]*>/i);
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => m + snippet);
+  if (/<head(?=[\s>])[^>]*>/i.test(html)) return html.replace(/<head(?=[\s>])[^>]*>/i, (m) => m + snippet);
   if (doctype) return html.slice(0, doctype[0].length) + snippet + html.slice(doctype[0].length);
   return snippet + html;
 }
@@ -129,7 +129,11 @@ async function build(entry, id) {
     let src = await W.readText(path);
     src = await replaceAsync(src, /(\bfrom\s*|\bimport\s*\(?\s*)(['"])((?:\.{1,2}\/|\/)[^'"\n]+)\2/g, async (m, pre, q, spec) => {
       const target = findModule(resolve(dirOf(path), spec));
-      if (!target || stack.includes(target)) return m;
+      if (!target) return m;
+      if (stack.includes(target) || target === path) {
+        pushLog(id, 'error', `Циклический импорт: ${path} ↔ ${target}. В превью модули собираются в один граф, циклы не поддерживаются. Вынеси общее в третий файл.`, 'preview');
+        return m;
+      }
       return `${pre}${q}${await moduleUrl(target, [...stack, path])}${q}`;
     });
     budget.left -= src.length;
@@ -159,11 +163,15 @@ async function build(entry, id) {
     try { return `<style>/* ${p} */\n${await css(await W.readText(p), dirOf(p))}\n</style>`; } catch { return tag; }
   });
 
+  // Скрипты с defer/async переносим в конец body: инлайн-скрипт иначе выполнился бы до разбора страницы.
+  const deferred = [];
   out = await replaceAsync(out, /<script\b([^>]*)\bsrc\s*=\s*["']([^"']+)["']([^>]*)>\s*<\/script>/gi, async (tag, a1, src, a2) => {
     if (isExternal(src)) return tag;
     const p = resolve(base, src);
     if (!W.exists(p)) return tag;
-    const attrs = `${a1} ${a2}`.replace(/\s+/g, ' ').trim();
+    let attrs = `${a1} ${a2}`.replace(/\s+/g, ' ').trim();
+    const late = /(^|\s)(defer|async)(\s|=|$)/i.test(attrs) && !/type\s*=\s*["']module/i.test(attrs);
+    attrs = attrs.replace(/(^|\s)(defer|async)(?=\s|=|$)(=["'][^"']*["'])?/gi, ' ').replace(/\s+/g, ' ').trim();
     try {
       const code = await W.readText(p);
       if (/type\s*=\s*["']module/i.test(attrs)) {
@@ -171,9 +179,16 @@ async function build(entry, id) {
         // инлайн-модуль, который импортирует собранный data-url
         return `<script type="module">import ${JSON.stringify(url)};<\/script>`;
       }
-      return `<script ${attrs}>/* ${p} */\n${code.replace(/<\/script/gi, '<\\/script')}\n<\/script>`;
+      const inline = `<script ${attrs}>/* ${p} */\n${code.replace(/<\/script/gi, '<\\/script')}\n<\/script>`;
+      if (late) { deferred.push(inline); return ''; }
+      return inline;
     } catch { return tag; }
   });
+  if (deferred.length) {
+    const tail = deferred.join('\n');
+    const k = out.toLowerCase().lastIndexOf('</body>');
+    out = k >= 0 ? out.slice(0, k) + tail + '\n' + out.slice(k) : out + '\n' + tail;
+  }
 
   out = await replaceAsync(out, /<script\b([^>]*)type\s*=\s*["']module["']([^>]*)>([\s\S]*?)<\/script>/gi, async (tag, a1, a2, code) => {
     if (/\bsrc\s*=/.test(a1 + a2) || !/(\bfrom\s*|\bimport\s*\(?\s*)['"](?:\.{1,2}\/|\/)/.test(code)) return tag;
@@ -240,7 +255,7 @@ export function runJs(code, timeout = 5000) {
     const body = String(code).replace(/<\/script/gi, '<\\/script');
     frame.srcdoc =
       `<!doctype html><html><body>${captureScript(id)}<script>` +
-      `window.addEventListener('error',function(){setTimeout(function(){parent.postMessage({__pult:1,id:${JSON.stringify(id)},done:1},'*')},60)});` +
+      `window.addEventListener('error',function(){setTimeout(function(){parent.postMessage({__pult:1,id:${JSON.stringify(id)},done:1},'*')},60)});<\/script><script>` +
       `(async function(){try{\n${body}\n}catch(e){console.error(e&&e.stack||String(e))}finally{parent.postMessage({__pult:1,id:${JSON.stringify(id)},done:1},'*')}})();<\/script></body></html>`;
     document.body.append(frame);
   });

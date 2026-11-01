@@ -42,19 +42,19 @@ async function ghw(method, path, token, body) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     if (r.status === 401) throw fail(401, 'GitHub не принял токен.', 'badtoken');
-    if (r.status === 403 || r.status === 404) throw fail(403, 'У токена нет прав на запись в этот репозиторий (нужен доступ Contents: write).', 'gh_write');
+    if (r.status === 403 || r.status === 404) throw Object.assign(fail(403, 'У токена нет прав на запись в этот репозиторий (нужен доступ Contents: write).', 'gh_write'), { upstream: r.status });
     throw Object.assign(fail(r.status === 422 ? 422 : 502, `GitHub: ${j.message || r.status}`), { upstream: r.status });
   }
   return j;
 }
 
 function parseRepo(v) {
-  if (typeof v !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(v)) throw fail(400, 'Некорректное имя репозитория');
+  if (typeof v !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(v) || v.split('/').some((x) => x === '.' || x === '..')) throw fail(400, 'Некорректное имя репозитория');
   return v;
 }
 
 function encPath(p) {
-  if (typeof p !== 'string' || !p || p.includes('..') || p.startsWith('/')) throw fail(400, 'Некорректный путь');
+  if (typeof p !== 'string' || !p || p.startsWith('/') || p.split('/').some((x) => x === '' || x === '.' || x === '..')) throw fail(400, 'Некорректный путь');
   return p.split('/').map(encodeURIComponent).join('/');
 }
 
@@ -75,11 +75,15 @@ module.exports = handler(async (req, res) => {
     const info = await (await gh(`/repos/${repo}`, token)).json();
     const base = info.default_branch || 'main';
     let branch = String(body.branch || '').trim();
-    if (branch && !/^[\w./-]{1,80}$/.test(branch)) throw fail(400, 'Некорректное имя ветки');
+    if (branch && (!/^[\w./-]{1,80}$/.test(branch) || branch.includes('..') || branch.includes('//') || /^[./]|[./]$|\.lock$/.test(branch))) throw fail(400, 'Некорректное имя ветки');
     if (!branch) branch = `pult-${new Date().toISOString().slice(0, 10)}-${Math.random().toString(36).slice(2, 6)}`;
 
     let head = null;
-    try { head = (await ghw('GET', `/repos/${repo}/git/ref/heads/${branch}`, token)).object.sha; } catch { /* ветки ещё нет */ }
+    try {
+      head = (await ghw('GET', `/repos/${repo}/git/ref/heads/${branch}`, token)).object.sha;
+    } catch (e) {
+      if (e.upstream !== 404) throw e; // нет ветки — создадим, любая другая ошибка настоящая
+    }
     if (!head) {
       const baseSha = (await ghw('GET', `/repos/${repo}/git/ref/heads/${base}`, token)).object.sha;
       await ghw('POST', `/repos/${repo}/git/refs`, token, { ref: `refs/heads/${branch}`, sha: baseSha });

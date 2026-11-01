@@ -35,8 +35,8 @@ function codeBlock(code, lang) {
   );
 }
 
-const FENCE = /^\s*```\s*([^\s`]*)[^`]*$/;
-const FENCE_END = /^\s*```\s*$/;
+const FENCE = /^\s*(`{3,})\s*([^\s`]*)[^`]*$/;
+const fenceEnd = (ticks) => new RegExp('^\\s*`{' + ticks.length + ',}\\s*$');
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const HR = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
@@ -93,9 +93,10 @@ export function renderMarkdown(src) {
     if ((m = line.match(FENCE))) {
       const buf = [];
       i++;
-      while (i < lines.length && !FENCE_END.test(lines[i])) buf.push(lines[i++]);
+      const end = fenceEnd(m[1]);
+      while (i < lines.length && !end.test(lines[i])) buf.push(lines[i++]);
       i++;
-      html += codeBlock(buf.join('\n'), m[1]);
+      html += codeBlock(buf.join('\n'), m[2]);
       continue;
     }
 

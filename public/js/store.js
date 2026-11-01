@@ -81,7 +81,7 @@ const DEFAULT_SETTINGS = {
   keys: { openrouter: '', access: '' },
   connectors: { github: { token: '' }, vercel: { token: '', team: '' } },
   // Агент: 'smart' — спрашивать перед записью только в настоящую папку, 'ask' — всегда, 'auto' — никогда.
-  agent: { on: true, confirm: 'smart', steps: 14, plan: false, rules: true },
+  agent: { on: true, confirm: 'smart', steps: 14, plan: false, rules: true, verify: true },
 };
 
 const SK = 'pult.settings.v1';

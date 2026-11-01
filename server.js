@@ -33,7 +33,8 @@ const TYPES = {
 function createServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://local');
-    const pathname = decodeURIComponent(url.pathname);
+    let pathname;
+    try { pathname = decodeURIComponent(url.pathname); } catch { res.statusCode = 400; return res.end('bad request'); }
 
     if (pathname.startsWith('/api/')) {
       const name = pathname.slice(5).replace(/[^\w-]/g, '');
@@ -49,7 +50,7 @@ function createServer() {
 
     let rel = pathname === '/' ? '/index.html' : pathname;
     const full = path.normalize(path.join(PUBLIC, rel));
-    if (!full.startsWith(PUBLIC)) {
+    if (full !== PUBLIC && !full.startsWith(PUBLIC + path.sep)) {
       res.statusCode = 403;
       return res.end('forbidden');
     }
